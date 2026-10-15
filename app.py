@@ -1,6 +1,7 @@
 
 import streamlit as st
 import pandas as pd
+from datetime import datetime, timezone
 
 # ============================================================
 # ΡΥΘΜΙΣΕΙΣ ΕΦΑΡΜΟΓΗΣ
@@ -13,47 +14,48 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# ============================================================
-# ΕΜΦΑΝΙΣΗ
-# ============================================================
-
 st.markdown("""
 <style>
-    .block-container {
-        padding-top: 2rem;
-        padding-bottom: 2rem;
-    }
-
-    [data-testid="stSidebar"] {
-        background-color: #19263e;
-    }
-
-    [data-testid="stSidebar"] * {
-        color: white;
-    }
-
-    div[data-testid="stMetric"] {
-        background-color: #f3f6fb;
-        padding: 18px;
-        border-radius: 12px;
-        border: 1px solid #e3e9f2;
-    }
-
-    div[data-testid="stMetric"] * {
-        color: #19263e;
-    }
+.block-container {
+    padding-top: 2rem;
+    padding-bottom: 2rem;
+}
+[data-testid="stSidebar"] {
+    background-color: #19263e;
+}
+[data-testid="stSidebar"] * {
+    color: white;
+}
+div[data-testid="stMetric"] {
+    background-color: #f3f6fb;
+    padding: 18px;
+    border-radius: 12px;
+    border: 1px solid #e3e9f2;
+}
+div[data-testid="stMetric"] * {
+    color: #19263e;
+}
 </style>
 """, unsafe_allow_html=True)
 
 
 # ============================================================
-# ΕΛΕΓΧΟΣ ΕΛΛΗΝΙΚΟΥ ΑΦΜ
+# ΒΟΗΘΗΤΙΚΕΣ ΣΥΝΑΡΤΗΣΕΙΣ
 # ============================================================
+
+def normalize(value):
+    return " ".join(str(value).strip().upper().split())
+
 
 def valid_greek_afm(afm):
     afm = str(afm).strip()
 
-    if len(afm) != 9 or not afm.isascii() or not afm.isdigit():
+    if (
+        len(afm) != 9
+        or not afm.isascii()
+        or not afm.isdigit()
+        or afm == "000000000"
+    ):
         return False
 
     total = sum(
@@ -61,30 +63,57 @@ def valid_greek_afm(afm):
         for i in range(8)
     )
 
-    check_digit = (total % 11) % 10
+    return (total % 11) % 10 == int(afm[8])
 
-    return check_digit == int(afm[8])
+
+def next_supplier_id():
+    return max(
+        (s["ID"] for s in st.session_state.suppliers),
+        default=0
+    ) + 1
+
+
+def add_history(supplier_id, afm, field, old, new, reason):
+    st.session_state.supplier_history.append({
+        "ΗΜΕΡΟΜΗΝΙΑ (UTC)": datetime.now(
+            timezone.utc
+        ).strftime("%d/%m/%Y %H:%M:%S"),
+        "ID ΠΡΟΜΗΘΕΥΤΗ": supplier_id,
+        "ΑΦΜ": afm,
+        "ΠΕΔΙΟ": field,
+        "ΠΑΛΙΑ ΤΙΜΗ": str(old),
+        "ΝΕΑ ΤΙΜΗ": str(new),
+        "ΑΙΤΙΟΛΟΓΙΑ": reason,
+        "ΧΡΗΣΤΗΣ": "DEMO USER"
+    })
 
 
 # ============================================================
-# ΔΟΚΙΜΑΣΤΙΚΟ ΜΗΤΡΩΟ ΠΡΟΜΗΘΕΥΤΩΝ
+# ΔΟΚΙΜΑΣΤΙΚΑ ΔΕΔΟΜΕΝΑ
 # ============================================================
 
 if "suppliers" not in st.session_state:
     st.session_state.suppliers = [
         {
+            "ID": 1,
             "ΑΦΜ": "000000000",
+            "ΟΝΟΜΑΣΙΑ ΟΠΩΣ ΗΡΘΕ": "ΔΟΚΙΜΑΣΤΙΚΟΣ Α",
             "ΠΡΟΜΗΘΕΥΤΗΣ": "ΔΟΚΙΜΑΣΤΙΚΟΣ ΠΡΟΜΗΘΕΥΤΗΣ Α",
             "ΧΩΡΑ": "Ελλάδα",
-            "ΚΑΤΑΣΤΑΣΗ": "Ενεργός"
+            "ΚΑΤΑΣΤΑΣΗ": "Προς έλεγχο"
         },
         {
+            "ID": 2,
             "ΑΦΜ": "123456789",
+            "ΟΝΟΜΑΣΙΑ ΟΠΩΣ ΗΡΘΕ": "ΔΟΚΙΜΑΣΤΙΚΟΣ Β",
             "ΠΡΟΜΗΘΕΥΤΗΣ": "ΔΟΚΙΜΑΣΤΙΚΟΣ ΠΡΟΜΗΘΕΥΤΗΣ Β",
             "ΧΩΡΑ": "Ελλάδα",
             "ΚΑΤΑΣΤΑΣΗ": "Προς έλεγχο"
         }
     ]
+
+if "supplier_history" not in st.session_state:
+    st.session_state.supplier_history = []
 
 
 # ============================================================
@@ -92,10 +121,8 @@ if "suppliers" not in st.session_state:
 # ============================================================
 
 with st.sidebar:
-
     st.title("📊 Market Price Analytics")
     st.caption("Σύστημα Παρακολούθησης Τιμών")
-
     st.divider()
 
     page = st.radio(
@@ -115,57 +142,33 @@ with st.sidebar:
     )
 
     st.divider()
-    st.caption("Market Price Analytics | Demo")
+    st.caption("Market Price Analytics | DEMO")
 
 
 # ============================================================
-# ΑΡΧΙΚΗ ΟΘΟΝΗ
+# ΑΡΧΙΚΗ
 # ============================================================
 
 if page == "🏠 Αρχική":
-
     st.title("🏠 Κεντρικός Πίνακας")
-
     st.write(
         "Σύστημα Παρακολούθησης Ανατιμήσεων και Υποτιμήσεων"
     )
 
     suppliers = st.session_state.suppliers
 
-    col1, col2, col3, col4 = st.columns(4)
+    c1, c2, c3, c4 = st.columns(4)
 
-    with col1:
-        st.metric("Σύνολο Ανατιμήσεων", 0)
-
-    with col2:
-        st.metric("Σύνολο Υποτιμήσεων", 0)
-
-    with col3:
-        st.metric("Προμηθευτές", len(suppliers))
-
-    with col4:
-        st.metric("Ανατιμήσεις > 3%", 0)
+    c1.metric("Σύνολο Ανατιμήσεων", 0)
+    c2.metric("Σύνολο Υποτιμήσεων", 0)
+    c3.metric("Προμηθευτές", len(suppliers))
+    c4.metric("Ανατιμήσεις > 3%", 0)
 
     st.divider()
-
     st.info(
         "Δεν έχουν εισαχθεί ακόμη δεδομένα ανατιμήσεων "
         "ή υποτιμήσεων."
     )
-
-    st.subheader("📌 Λειτουργίες εφαρμογής")
-
-    col_a, col_b = st.columns(2)
-
-    with col_a:
-        st.write("📈 Παρακολούθηση ανατιμήσεων")
-        st.write("📉 Παρακολούθηση υποτιμήσεων")
-        st.write("🏢 Διαχείριση προμηθευτών")
-
-    with col_b:
-        st.write("🗂️ Αντιστοίχιση κατηγοριών")
-        st.write("📥 Εισαγωγή αρχείων Excel")
-        st.write("📊 Στατιστικά και αναφορές")
 
 
 # ============================================================
@@ -173,21 +176,14 @@ if page == "🏠 Αρχική":
 # ============================================================
 
 elif page == "📈 Ανατιμήσεις":
-
     st.title("📈 Ανατιμήσεις")
-
-    st.caption(
-        "Παρακολούθηση μεταβολών χονδρικών τιμών προϊόντων"
-    )
-
     st.info(
-        "Εδώ θα εμφανίζεται ο πίνακας ανατιμήσεων "
-        "με τα 16 πεδία της υπηρεσίας."
+        "Εδώ θα εμφανίζονται οι 16 στήλες "
+        "του κεντρικού αρχείου ανατιμήσεων."
     )
-
     st.warning(
-        "Οι ποσοστιαίες ανατιμήσεις άνω του 3% "
-        "θα επισημαίνονται με κόκκινο χρώμα."
+        "Ποσοστιαία ανατίμηση τελευταίας τιμής "
+        "πάνω από 3%: κόκκινη επισήμανση."
     )
 
 
@@ -196,15 +192,9 @@ elif page == "📈 Ανατιμήσεις":
 # ============================================================
 
 elif page == "📉 Υποτιμήσεις":
-
     st.title("📉 Υποτιμήσεις")
-
-    st.caption(
-        "Παρακολούθηση μειώσεων χονδρικών τιμών προϊόντων"
-    )
-
     st.info(
-        "Εδώ θα εμφανίζονται οι εγγραφές υποτιμήσεων "
+        "Εδώ θα εμφανίζονται οι υποτιμήσεις "
         "και οι αντίστοιχοι υπολογισμοί."
     )
 
@@ -216,67 +206,58 @@ elif page == "📉 Υποτιμήσεις":
 elif page == "🏢 Μητρώο Προμηθευτών":
 
     st.title("🏢 Μητρώο Προμηθευτών")
-
     st.caption(
-        "Διαχείριση ΑΦΜ και επωνυμιών προμηθευτών "
-        "— δοκιμαστικά δεδομένα"
+        "Δοκιμαστική διαχείριση προμηθευτών "
+        "με ιστορικό αλλαγών"
     )
 
     suppliers = st.session_state.suppliers
 
-    # --------------------------------------------------------
-    # ΣΤΑΤΙΣΤΙΚΑ
-    # --------------------------------------------------------
+    c1, c2, c3, c4 = st.columns(4)
 
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        st.metric(
-            "Σύνολο Προμηθευτών",
-            len(suppliers)
+    c1.metric("Σύνολο", len(suppliers))
+    c2.metric(
+        "Ενεργοί",
+        sum(
+            s["ΚΑΤΑΣΤΑΣΗ"] == "Ενεργός"
+            for s in suppliers
         )
-
-    with col2:
-        st.metric(
-            "Ενεργοί",
-            sum(
-                s["ΚΑΤΑΣΤΑΣΗ"] == "Ενεργός"
-                for s in suppliers
-            )
+    )
+    c3.metric(
+        "Προς έλεγχο",
+        sum(
+            s["ΚΑΤΑΣΤΑΣΗ"] == "Προς έλεγχο"
+            for s in suppliers
         )
-
-    with col3:
-        st.metric(
-            "Προς έλεγχο",
-            sum(
-                s["ΚΑΤΑΣΤΑΣΗ"] == "Προς έλεγχο"
-                for s in suppliers
-            )
-        )
+    )
+    c4.metric(
+        "Αλλαγές",
+        len(st.session_state.supplier_history)
+    )
 
     st.divider()
 
-    tab1, tab2, tab3 = st.tabs([
-        "📋 Λίστα Προμηθευτών",
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📋 Προμηθευτές",
         "➕ Νέος Προμηθευτής",
+        "✏️ Επεξεργασία",
+        "🕘 Ιστορικό Αλλαγών",
         "🔍 Έλεγχος ΑΦΜ"
     ])
 
     # --------------------------------------------------------
-    # ΛΙΣΤΑ ΠΡΟΜΗΘΕΥΤΩΝ
+    # ΚΑΡΤΕΛΑ 1 — ΠΡΟΜΗΘΕΥΤΕΣ
     # --------------------------------------------------------
 
     with tab1:
-
-        st.subheader("📋 Κατάλογος Προμηθευτών")
+        st.subheader("Κατάλογος Προμηθευτών")
 
         search = st.text_input(
-            "Αναζήτηση ΑΦΜ ή επωνυμίας",
-            placeholder="Πληκτρολόγησε ΑΦΜ ή προμηθευτή"
+            "🔍 Αναζήτηση ΑΦΜ ή επωνυμίας"
         )
 
         status_filter = st.selectbox(
-            "Φίλτρο κατάστασης",
+            "Κατάσταση",
             [
                 "Όλοι",
                 "Ενεργός",
@@ -287,65 +268,75 @@ elif page == "🏢 Μητρώο Προμηθευτών":
 
         filtered = []
 
-        for supplier in suppliers:
+        for s in suppliers:
+            searchable = " ".join([
+                s["ΑΦΜ"],
+                s["ΟΝΟΜΑΣΙΑ ΟΠΩΣ ΗΡΘΕ"],
+                s["ΠΡΟΜΗΘΕΥΤΗΣ"]
+            ]).lower()
 
-            matches_search = (
-                search.lower()
-                in (
-                    supplier["ΑΦΜ"] + " "
-                    + supplier["ΠΡΟΜΗΘΕΥΤΗΣ"]
-                ).lower()
-            )
+            if (
+                search.lower() in searchable
+                and (
+                    status_filter == "Όλοι"
+                    or s["ΚΑΤΑΣΤΑΣΗ"] == status_filter
+                )
+            ):
+                filtered.append(s)
 
-            matches_status = (
-                status_filter == "Όλοι"
-                or supplier["ΚΑΤΑΣΤΑΣΗ"] == status_filter
-            )
-
-            if matches_search and matches_status:
-                filtered.append(supplier)
-
-        df = pd.DataFrame(
-            filtered,
-            columns=[
-                "ΑΦΜ",
-                "ΠΡΟΜΗΘΕΥΤΗΣ",
-                "ΧΩΡΑ",
-                "ΚΑΤΑΣΤΑΣΗ"
-            ]
-        )
+        columns = [
+            "ID",
+            "ΑΦΜ",
+            "ΟΝΟΜΑΣΙΑ ΟΠΩΣ ΗΡΘΕ",
+            "ΠΡΟΜΗΘΕΥΤΗΣ",
+            "ΧΩΡΑ",
+            "ΚΑΤΑΣΤΑΣΗ"
+        ]
 
         st.dataframe(
-            df,
+            pd.DataFrame(filtered, columns=columns),
             use_container_width=True,
             hide_index=True
         )
 
         st.caption(
-            f"Εμφανίζονται {len(filtered)} προμηθευτές."
+            f"Εμφανίζονται {len(filtered)} εγγραφές."
         )
 
+        duplicate_afms = {
+            s["ΑΦΜ"]
+            for s in suppliers
+            if sum(
+                x["ΑΦΜ"] == s["ΑΦΜ"]
+                for x in suppliers
+            ) > 1
+        }
+
+        if duplicate_afms:
+            st.error(
+                "Εντοπίστηκαν διπλότυπα ΑΦΜ: "
+                + ", ".join(sorted(duplicate_afms))
+            )
+
     # --------------------------------------------------------
-    # ΠΡΟΣΘΗΚΗ ΠΡΟΜΗΘΕΥΤΗ
+    # ΚΑΡΤΕΛΑ 2 — ΝΕΟΣ ΠΡΟΜΗΘΕΥΤΗΣ
     # --------------------------------------------------------
 
     with tab2:
-
-        st.subheader("➕ Καταχώριση Νέου Προμηθευτή")
+        st.subheader("➕ Καταχώριση Προμηθευτή")
 
         with st.form(
             "new_supplier_form",
             clear_on_submit=True
         ):
+            afm = st.text_input("ΑΦΜ / VAT ID")
 
-            afm = st.text_input(
-                "ΑΦΜ / VAT ID",
-                placeholder="Εισαγωγή ΑΦΜ"
+            original_name = st.text_input(
+                "Ονομασία όπως ήρθε"
             )
 
-            name = st.text_input(
-                "Επωνυμία Προμηθευτή",
-                placeholder="Εισαγωγή επωνυμίας"
+            official_name = st.text_input(
+                "Επίσημη επωνυμία"
             )
 
             country = st.selectbox(
@@ -356,104 +347,276 @@ elif page == "🏢 Μητρώο Προμηθευτών":
             status = st.selectbox(
                 "Κατάσταση",
                 [
-                    "Ενεργός",
                     "Προς έλεγχο",
+                    "Ενεργός",
                     "Ανενεργός"
-                ],
-                index=1
+                ]
             )
 
             submitted = st.form_submit_button(
-                "💾 Αποθήκευση Προμηθευτή",
+                "💾 Αποθήκευση",
                 type="primary"
             )
 
         if submitted:
+            afm = normalize(afm)
+            original_name = normalize(original_name)
+            official_name = normalize(official_name)
 
-            afm = afm.strip().upper()
-            name = name.strip()
+            if not afm or not original_name or not official_name:
+                st.error("Συμπλήρωσε όλα τα υποχρεωτικά πεδία.")
 
-            if not afm or not name:
+            elif any(s["ΑΦΜ"] == afm for s in suppliers):
+                st.error("Το ΑΦΜ υπάρχει ήδη στο μητρώο.")
 
+            elif country == "Ελλάδα" and not valid_greek_afm(afm):
                 st.error(
-                    "Συμπλήρωσε υποχρεωτικά ΑΦΜ και επωνυμία."
-                )
-
-            elif any(
-                s["ΑΦΜ"] == afm
-                for s in suppliers
-            ):
-
-                st.error(
-                    "Το συγκεκριμένο ΑΦΜ υπάρχει ήδη."
-                )
-
-            elif (
-                country == "Ελλάδα"
-                and not valid_greek_afm(afm)
-            ):
-
-                st.error(
-                    "Το ελληνικό ΑΦΜ δεν είναι έγκυρο."
+                    "Το ελληνικό ΑΦΜ δεν περνά "
+                    "τον μαθηματικό έλεγχο."
                 )
 
             else:
-
                 if country == "Εξωτερικό":
                     status = "Προς έλεγχο"
 
+                supplier_id = next_supplier_id()
+
                 suppliers.append({
+                    "ID": supplier_id,
                     "ΑΦΜ": afm,
-                    "ΠΡΟΜΗΘΕΥΤΗΣ": name,
+                    "ΟΝΟΜΑΣΙΑ ΟΠΩΣ ΗΡΘΕ": original_name,
+                    "ΠΡΟΜΗΘΕΥΤΗΣ": official_name,
                     "ΧΩΡΑ": country,
                     "ΚΑΤΑΣΤΑΣΗ": status
                 })
 
-                st.success(
-                    "Ο προμηθευτής καταχωρίστηκε "
-                    "στη δοκιμαστική συνεδρία!"
+                add_history(
+                    supplier_id,
+                    afm,
+                    "ΔΗΜΙΟΥΡΓΙΑ",
+                    "",
+                    official_name,
+                    "Νέα δοκιμαστική καταχώριση"
                 )
 
-                if country == "Εξωτερικό":
-                    st.warning(
-                        "Το ξένο VAT ID χρειάζεται "
-                        "επιπλέον έλεγχο."
-                    )
+                st.success(
+                    "Ο προμηθευτής προστέθηκε επιτυχώς!"
+                )
 
     # --------------------------------------------------------
-    # ΕΛΕΓΧΟΣ ΑΦΜ
+    # ΚΑΡΤΕΛΑ 3 — ΕΠΕΞΕΡΓΑΣΙΑ
     # --------------------------------------------------------
 
     with tab3:
+        st.subheader("✏️ Επεξεργασία Προμηθευτή")
 
-        st.subheader("🔍 Έλεγχος Ελληνικού ΑΦΜ")
+        supplier_options = {
+            f'{s["ID"]} | {s["ΑΦΜ"]} | {s["ΠΡΟΜΗΘΕΥΤΗΣ"]}':
+            s["ID"]
+            for s in suppliers
+        }
 
-        afm_check = st.text_input(
-            "Πληκτρολόγησε ελληνικό ΑΦΜ",
-            key="afm_check"
+        selected_label = st.selectbox(
+            "Επίλεξε προμηθευτή",
+            list(supplier_options.keys())
         )
 
-        if st.button("Έλεγχος εγκυρότητας"):
+        selected_id = supplier_options[selected_label]
 
-            afm_check = afm_check.strip()
+        selected = next(
+            s for s in suppliers
+            if s["ID"] == selected_id
+        )
 
-            if valid_greek_afm(afm_check):
+        st.info(
+            "Η αρχική ονομασία διατηρείται "
+            "και δεν τροποποιείται."
+        )
 
-                st.success(
-                    "Το ΑΦΜ έχει έγκυρο ψηφίο ελέγχου."
+        st.text_input(
+            "Ονομασία όπως ήρθε",
+            value=selected["ΟΝΟΜΑΣΙΑ ΟΠΩΣ ΗΡΘΕ"],
+            disabled=True
+        )
+
+        with st.form(
+            f"edit_supplier_{selected_id}"
+        ):
+            new_afm = st.text_input(
+                "ΑΦΜ / VAT ID",
+                value=selected["ΑΦΜ"]
+            )
+
+            new_name = st.text_input(
+                "Επίσημη επωνυμία",
+                value=selected["ΠΡΟΜΗΘΕΥΤΗΣ"]
+            )
+
+            new_country = st.selectbox(
+                "Χώρα",
+                ["Ελλάδα", "Εξωτερικό"],
+                index=(
+                    0 if selected["ΧΩΡΑ"] == "Ελλάδα"
+                    else 1
+                )
+            )
+
+            statuses = [
+                "Προς έλεγχο",
+                "Ενεργός",
+                "Ανενεργός"
+            ]
+
+            new_status = st.selectbox(
+                "Κατάσταση",
+                statuses,
+                index=statuses.index(
+                    selected["ΚΑΤΑΣΤΑΣΗ"]
+                )
+            )
+
+            reason = st.text_area(
+                "Αιτιολογία αλλαγής",
+                placeholder=(
+                    "Περιέγραψε γιατί γίνεται η διόρθωση"
+                )
+            )
+
+            save_edit = st.form_submit_button(
+                "💾 Αποθήκευση αλλαγών",
+                type="primary"
+            )
+
+        if save_edit:
+            new_afm = normalize(new_afm)
+            new_name = normalize(new_name)
+            reason = reason.strip()
+
+            changes = {
+                "ΑΦΜ": new_afm,
+                "ΠΡΟΜΗΘΕΥΤΗΣ": new_name,
+                "ΧΩΡΑ": new_country,
+                "ΚΑΤΑΣΤΑΣΗ": new_status
+            }
+
+            changed_fields = [
+                field
+                for field, value in changes.items()
+                if selected[field] != value
+            ]
+
+            duplicate = any(
+                s["ΑΦΜ"] == new_afm
+                and s["ID"] != selected_id
+                for s in suppliers
+            )
+
+            if not changed_fields:
+                st.info("Δεν πραγματοποιήθηκε κάποια αλλαγή.")
+
+            elif not reason:
+                st.error(
+                    "Η αιτιολογία αλλαγής είναι υποχρεωτική."
+                )
+
+            elif not new_afm or not new_name:
+                st.error(
+                    "Το ΑΦΜ και η επωνυμία "
+                    "δεν μπορούν να είναι κενά."
+                )
+
+            elif duplicate:
+                st.error(
+                    "Το νέο ΑΦΜ ανήκει ήδη "
+                    "σε άλλον προμηθευτή."
+                )
+
+            elif (
+                new_country == "Ελλάδα"
+                and not valid_greek_afm(new_afm)
+            ):
+                st.error(
+                    "Το νέο ελληνικό ΑΦΜ "
+                    "δεν είναι μαθηματικά έγκυρο."
+                )
+
+            elif (
+                new_country == "Εξωτερικό"
+                and new_status == "Ενεργός"
+            ):
+                st.error(
+                    "Τα ξένα VAT IDs παραμένουν "
+                    "προς έλεγχο στη δοκιμαστική έκδοση."
                 )
 
             else:
+                old_afm = selected["ΑΦΜ"]
 
+                for field in changed_fields:
+                    add_history(
+                        selected_id,
+                        old_afm,
+                        field,
+                        selected[field],
+                        changes[field],
+                        reason
+                    )
+
+                    selected[field] = changes[field]
+
+                st.success(
+                    "Οι αλλαγές αποθηκεύτηκαν "
+                    "στη δοκιμαστική συνεδρία!"
+                )
+
+                st.rerun()
+
+    # --------------------------------------------------------
+    # ΚΑΡΤΕΛΑ 4 — ΙΣΤΟΡΙΚΟ
+    # --------------------------------------------------------
+
+    with tab4:
+        st.subheader("🕘 Ιστορικό Αλλαγών")
+
+        history = st.session_state.supplier_history
+
+        if history:
+            st.dataframe(
+                pd.DataFrame(history),
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.info(
+                "Δεν υπάρχουν ακόμη αλλαγές."
+            )
+
+    # --------------------------------------------------------
+    # ΚΑΡΤΕΛΑ 5 — ΕΛΕΓΧΟΣ ΑΦΜ
+    # --------------------------------------------------------
+
+    with tab5:
+        st.subheader("🔍 Έλεγχος Ελληνικού ΑΦΜ")
+
+        afm_check = st.text_input(
+            "ΑΦΜ για έλεγχο"
+        )
+
+        if st.button("Έλεγχος εγκυρότητας"):
+            if valid_greek_afm(afm_check):
+                st.success(
+                    "Το ΑΦΜ έχει έγκυρο "
+                    "ψηφίο ελέγχου."
+                )
+            else:
                 st.error(
-                    "Το ΑΦΜ δεν περνά τον μαθηματικό "
-                    "έλεγχο εγκυρότητας."
+                    "Το ΑΦΜ δεν περνά "
+                    "τον μαθηματικό έλεγχο."
                 )
 
         st.caption(
-            "Ο έλεγχος αφορά μόνο τη μαθηματική "
-            "εγκυρότητα και δεν επιβεβαιώνει "
-            "την ύπαρξη ή την επωνυμία επιχείρησης."
+            "Δεν πραγματοποιείται διασταύρωση "
+            "με την ΑΑΔΕ ή το VIES."
         )
 
 
@@ -462,13 +625,11 @@ elif page == "🏢 Μητρώο Προμηθευτών":
 # ============================================================
 
 elif page == "🗂️ Μητρώο Κατηγοριών":
-
     st.title("🗂️ Μητρώο Κατηγοριών")
-
     st.info(
-        "Εδώ θα αντιστοιχίζονται οι κατηγορίες "
-        "των σούπερ μάρκετ με τις επίσημες "
-        "κατηγορίες της υπηρεσίας."
+        "Εδώ θα δημιουργήσουμε την αντιστοίχιση "
+        "κατηγοριών των αλυσίδων με τις "
+        "επίσημες κατηγορίες της υπηρεσίας."
     )
 
 
@@ -477,31 +638,23 @@ elif page == "🗂️ Μητρώο Κατηγοριών":
 # ============================================================
 
 elif page == "📥 Εισαγωγή Excel":
-
     st.title("📥 Εισαγωγή Excel")
-
     st.info(
-        "Η εισαγωγή αρχείων θα ενεργοποιηθεί "
-        "όταν ολοκληρώσουμε τους ελέγχους και "
-        "την ασφαλή αποθήκευση."
+        "Εδώ θα εισάγουμε τα Draft ανατιμήσεων "
+        "και υποτιμήσεων μετά την ολοκλήρωση "
+        "των ελέγχων."
     )
-
-    st.write("📈 Draft Ανατιμήσεων — 11 στήλες")
-    st.write("📉 Draft Υποτιμήσεων — 11 στήλες")
 
 
 # ============================================================
-# ΣΤΑΤΙΣΤΙΚΑ ΚΑΙ ΑΝΑΦΟΡΕΣ
+# ΣΤΑΤΙΣΤΙΚΑ
 # ============================================================
 
 elif page == "📊 Στατιστικά & Αναφορές":
-
     st.title("📊 Στατιστικά & Αναφορές")
-
     st.info(
-        "Εδώ θα δημιουργήσουμε διαγράμματα "
-        "ανά σούπερ μάρκετ, προμηθευτή, "
-        "κατηγορία και χρονική περίοδο."
+        "Εδώ θα εμφανίζονται τα στατιστικά "
+        "ανά αλυσίδα, προμηθευτή και κατηγορία."
     )
 
 
@@ -510,13 +663,10 @@ elif page == "📊 Στατιστικά & Αναφορές":
 # ============================================================
 
 elif page == "🕘 Ιστορικό Εισαγωγών":
-
     st.title("🕘 Ιστορικό Εισαγωγών")
-
     st.info(
-        "Εδώ θα καταγράφονται τα αρχεία "
-        "που εισάγονται, η ημερομηνία, "
-        "ο χρήστης και τα αποτελέσματα ελέγχων."
+        "Εδώ θα καταγράφονται οι εισαγωγές Excel "
+        "και τα αποτελέσματα των ελέγχων."
     )
 
 
@@ -525,17 +675,14 @@ elif page == "🕘 Ιστορικό Εισαγωγών":
 # ============================================================
 
 elif page == "⚙️ Ρυθμίσεις":
-
     st.title("⚙️ Ρυθμίσεις")
-
-    st.subheader("Γενικές πληροφορίες")
 
     st.write("Εφαρμογή: Market Price Analytics")
     st.write("Τεχνολογία: Python / Streamlit")
-    st.write("Κατάσταση: Δοκιμαστική έκδοση")
+    st.write("Έκδοση: Demo — Supplier Registry v2")
 
     st.warning(
-        "Η εφαρμογή είναι δημόσια δοκιμαστική "
-        "και δεν πρέπει να χρησιμοποιείται "
-        "για πραγματικά υπηρεσιακά δεδομένα."
+        "Η εφαρμογή είναι δημόσια δοκιμαστική. "
+        "Δεν επιτρέπεται η καταχώριση "
+        "πραγματικών υπηρεσιακών δεδομένων."
     )
