@@ -112,9 +112,90 @@ if "suppliers" not in st.session_state:
         }
     ]
 
+
+for supplier in st.session_state.suppliers:
+    supplier.setdefault("ΟΝΟΜΑΣΙΑ ΟΠΩΣ ΗΡΘΕ", supplier.get("ΠΡΟΜΗΘΕΥΤΗΣ", ""))
+    supplier.setdefault("ΧΩΡΑ", "Ελλάδα")
+    supplier.setdefault("ΚΑΤΑΣΤΑΣΗ", "Προς έλεγχο")
+
 if "supplier_history" not in st.session_state:
     st.session_state.supplier_history = []
 
+
+
+# ============================================================
+# ΑΠΟΚΛΕΙΣΤΙΚΑ ΣΥΝΘΕΤΙΚΑ ΔΕΔΟΜΕΝΑ ΕΠΙΔΕΙΞΗΣ
+# ============================================================
+
+@st.cache_data
+def demo_prices():
+    products = ["Γάλα", "Γιαούρτι", "Τυρί", "Ρύζι", "Ζυμαρικά", "Ελαιόλαδο", "Καφές", "Αλεύρι", "Χυμός", "Απορρυπαντικό"]
+    categories = ["Γαλακτοκομικά", "Γαλακτοκομικά", "Γαλακτοκομικά", "Τρόφιμα", "Τρόφιμα", "Έλαια", "Ροφήματα", "Τρόφιμα", "Ροφήματα", "Οικιακά"]
+    chains = ["Αλυσίδα Α", "Αλυσίδα Β", "Αλυσίδα Γ"]
+    rows = []
+    for i in range(120):
+        old = round(1.25 + (i % 17) * 0.43, 2)
+        change = ((i * 7) % 23 - 9) / 100
+        new = round(old * (1 + change), 2)
+        rows.append({
+            "Ημερομηνία": pd.Timestamp("2026-01-01") + pd.Timedelta(days=(i * 2) % 270),
+            "Αλυσίδα": chains[i % 3],
+            "Προμηθευτής": f"DEMO Προμηθευτής {i % 8 + 1}",
+            "Προϊόν": products[i % len(products)],
+            "Κατηγορία": categories[i % len(categories)],
+            "Προηγούμενη τιμή": old,
+            "Νέα τιμή": new,
+            "Μεταβολή %": round((new / old - 1) * 100, 2),
+        })
+    return pd.DataFrame(rows)
+
+
+def price_table(data, increase=True):
+    if data.empty:
+        st.info("Δεν υπάρχουν εγγραφές για τα επιλεγμένα φίλτρα.")
+        return
+    display = data.copy().sort_values("Ημερομηνία", ascending=False)
+    display["Ημερομηνία"] = display["Ημερομηνία"].dt.strftime("%d/%m/%Y")
+    def color_change(value):
+        if increase and value > 3:
+            return "background-color: #ffe1e1; color: #8f1515; font-weight: bold"
+        if not increase and value < 0:
+            return "background-color: #e0f5e7; color: #166534; font-weight: bold"
+        return ""
+    st.dataframe(display.style.map(color_change, subset=["Μεταβολή %"]),
+                 use_container_width=True, hide_index=True, height=410)
+    st.download_button("⬇️ Εξαγωγή φιλτραρισμένων δεδομένων CSV (DEMO)",
+                       display.to_csv(index=False).encode("utf-8-sig"),
+                       file_name="demo_prices.csv", mime="text/csv")
+
+
+def price_view(increase=True):
+    df = demo_prices()
+    df = df[df["Μεταβολή %"] > 0] if increase else df[df["Μεταβολή %"] < 0]
+    a, b, c = st.columns(3)
+    chain = a.selectbox("Αλυσίδα", ["Όλες"] + sorted(df["Αλυσίδα"].unique().tolist()), key=f"chain_{increase}")
+    category = b.selectbox("Κατηγορία", ["Όλες"] + sorted(df["Κατηγορία"].unique().tolist()), key=f"category_{increase}")
+    search = c.text_input("Αναζήτηση προϊόντος / προμηθευτή", key=f"search_{increase}")
+    if chain != "Όλες":
+        df = df[df["Αλυσίδα"] == chain]
+    if category != "Όλες":
+        df = df[df["Κατηγορία"] == category]
+    if search.strip():
+        df = df[df["Προϊόν"].str.contains(search, case=False, regex=False) |
+                df["Προμηθευτής"].str.contains(search, case=False, regex=False)]
+    x, y, z = st.columns(3)
+    x.metric("Εγγραφές", len(df))
+    y.metric("Μέση μεταβολή", f"{df['Μεταβολή %'].mean():.2f}%" if len(df) else "—")
+    z.metric("Μέγιστη ανατίμηση" if increase else "Μεγαλύτερη υποτίμηση",
+             f"{(df['Μεταβολή %'].max() if increase else df['Μεταβολή %'].min()):.2f}%" if len(df) else "—")
+    st.subheader("Αναλυτικός πίνακας")
+    if increase:
+        st.caption("Κόκκινη επισήμανση μόνο όταν η μεταβολή είναι αυστηρά μεγαλύτερη από 3%.")
+    price_table(df, increase)
+    if len(df):
+        st.subheader("Μεταβολές ανά κατηγορία")
+        chart = df.groupby("Κατηγορία")["Μεταβολή %"].mean().sort_values()
+        st.bar_chart(chart, horizontal=True)
 
 # ============================================================
 # ΠΛΕΥΡΙΚΟ ΜΕΝΟΥ
@@ -150,53 +231,37 @@ with st.sidebar:
 # ============================================================
 
 if page == "🏠 Αρχική":
-    st.title("🏠 Κεντρικός Πίνακας")
-    st.write(
-        "Σύστημα Παρακολούθησης Ανατιμήσεων και Υποτιμήσεων"
-    )
-
-    suppliers = st.session_state.suppliers
-
+    st.title("📊 Κεντρικός Πίνακας")
+    st.caption("DEMO με συνθετικά δεδομένα — όχι πραγματικές τιμές αγοράς")
+    df = demo_prices()
+    inc = df[df["Μεταβολή %"] > 0]
+    dec = df[df["Μεταβολή %"] < 0]
     c1, c2, c3, c4 = st.columns(4)
-
-    c1.metric("Σύνολο Ανατιμήσεων", 0)
-    c2.metric("Σύνολο Υποτιμήσεων", 0)
-    c3.metric("Προμηθευτές", len(suppliers))
-    c4.metric("Ανατιμήσεις > 3%", 0)
-
+    c1.metric("Ανατιμήσεις", len(inc))
+    c2.metric("Υποτιμήσεις", len(dec))
+    c3.metric("Προμηθευτές μητρώου", len(st.session_state.suppliers))
+    c4.metric("Ανατιμήσεις > 3%", int((inc["Μεταβολή %"] > 3).sum()))
     st.divider()
-    st.info(
-        "Δεν έχουν εισαχθεί ακόμη δεδομένα ανατιμήσεων "
-        "ή υποτιμήσεων."
-    )
-
-
-# ============================================================
-# ΑΝΑΤΙΜΗΣΕΙΣ
-# ============================================================
+    left, right = st.columns(2)
+    with left:
+        st.subheader("Εγγραφές ανά κατηγορία")
+        st.bar_chart(df.groupby("Κατηγορία").size().rename("Εγγραφές"))
+    with right:
+        st.subheader("Μέση μεταβολή ανά αλυσίδα")
+        st.bar_chart(df.groupby("Αλυσίδα")["Μεταβολή %"].mean())
+    st.subheader("Εξέλιξη μέσης ποσοστιαίας μεταβολής")
+    monthly = df.assign(Μήνας=df["Ημερομηνία"].dt.to_period("M").dt.to_timestamp())
+    st.line_chart(monthly.groupby("Μήνας")["Μεταβολή %"].mean())
 
 elif page == "📈 Ανατιμήσεις":
     st.title("📈 Ανατιμήσεις")
-    st.info(
-        "Εδώ θα εμφανίζονται οι 16 στήλες "
-        "του κεντρικού αρχείου ανατιμήσεων."
-    )
-    st.warning(
-        "Ποσοστιαία ανατίμηση τελευταίας τιμής "
-        "πάνω από 3%: κόκκινη επισήμανση."
-    )
-
-
-# ============================================================
-# ΥΠΟΤΙΜΗΣΕΙΣ
-# ============================================================
+    st.caption("Συνθετικές εγγραφές επίδειξης — οι 16 στήλες του πραγματικού αρχείου θα προστεθούν μετά την ασφαλή αντιστοίχιση.")
+    price_view(True)
 
 elif page == "📉 Υποτιμήσεις":
     st.title("📉 Υποτιμήσεις")
-    st.info(
-        "Εδώ θα εμφανίζονται οι υποτιμήσεις "
-        "και οι αντίστοιχοι υπολογισμοί."
-    )
+    st.caption("Συνθετικές εγγραφές επίδειξης")
+    price_view(False)
 
 
 # ============================================================
@@ -640,9 +705,8 @@ elif page == "🗂️ Μητρώο Κατηγοριών":
 elif page == "📥 Εισαγωγή Excel":
     st.title("📥 Εισαγωγή Excel")
     st.info(
-        "Εδώ θα εισάγουμε τα Draft ανατιμήσεων "
-        "και υποτιμήσεων μετά την ολοκλήρωση "
-        "των ελέγχων."
+        "Η εισαγωγή πραγματικών υπηρεσιακών Excel είναι απενεργοποιημένη στη δημόσια DEMO. "
+        "Θα υλοποιηθεί μόνο σε εγκεκριμένο, προστατευμένο περιβάλλον."
     )
 
 
@@ -652,10 +716,17 @@ elif page == "📥 Εισαγωγή Excel":
 
 elif page == "📊 Στατιστικά & Αναφορές":
     st.title("📊 Στατιστικά & Αναφορές")
-    st.info(
-        "Εδώ θα εμφανίζονται τα στατιστικά "
-        "ανά αλυσίδα, προμηθευτή και κατηγορία."
-    )
+    st.caption("Ανάλυση αποκλειστικά συνθετικών δεδομένων")
+    df = demo_prices()
+    choice = st.selectbox("Ομαδοποίηση", ["Κατηγορία", "Αλυσίδα", "Προμηθευτής"])
+    summary = df.groupby(choice).agg(
+        Εγγραφές=("Μεταβολή %", "size"),
+        Μέση_μεταβολή=("Μεταβολή %", "mean"),
+        Μέγιστη_μεταβολή=("Μεταβολή %", "max"),
+        Ελάχιστη_μεταβολή=("Μεταβολή %", "min")
+    ).round(2).reset_index()
+    st.dataframe(summary, use_container_width=True, hide_index=True)
+    st.bar_chart(summary.set_index(choice)["Μέση_μεταβολή"], horizontal=True)
 
 
 # ============================================================
@@ -679,7 +750,7 @@ elif page == "⚙️ Ρυθμίσεις":
 
     st.write("Εφαρμογή: Market Price Analytics")
     st.write("Τεχνολογία: Python / Streamlit")
-    st.write("Έκδοση: Demo — Supplier Registry v2")
+    st.write("Έκδοση: Demo — Analytics & Supplier Registry v3")
 
     st.warning(
         "Η εφαρμογή είναι δημόσια δοκιμαστική. "
