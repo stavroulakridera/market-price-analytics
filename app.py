@@ -986,6 +986,18 @@ elif page == "🕘 Ιστορικό Εισαγωγών":
 elif page == "⚙️ Ρυθμίσεις":
     st.title("⚙️ Ρυθμίσεις")
 
+    if current_user["role"] == "admin":
+        st.subheader("🔌 Έλεγχος σύνδεσης Supabase (μόνο ανάγνωση)")
+        if st.button("Έλεγχος PostgreSQL", key="db_smoke_test"):
+            try:
+                from db import check_schema
+                tables = check_schema()
+                st.success(f"Η σύνδεση πέτυχε. Βρέθηκαν {len(tables)} πίνακες στο schema mpa.")
+                st.write(", ".join(tables) if tables else "Δεν βρέθηκαν πίνακες στο mpa.")
+            except Exception:
+                st.error("Η σύνδεση απέτυχε. Έλεγξε τα Streamlit Secrets, το SSL και τις ρυθμίσεις δικτύου του Supabase. Ο κωδικός δεν εμφανίζεται.")
+
+
     st.write("Εφαρμογή: Market Price Analytics")
     st.write("Τεχνολογία: Python / Streamlit")
     st.write("Έκδοση: Demo — Analytics & Supplier Registry v3")
