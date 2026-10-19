@@ -70,6 +70,23 @@ def clean_identifier(value):
     return text[:-2] if re.fullmatch(r"\d+\.0", text) else text
 
 
+def normalize_afm(value):
+    """Normalize common first-character errors from supermarket Excel files.
+
+    Returns (normalized_value, correction_description). Invalid formats return
+    the original cleaned value so that validation can reject them.
+    """
+    raw = clean_identifier(value)
+    raw = "".join(raw.split())
+    if not raw:
+        return "", ""
+    if len(raw) == 9 and raw[0] in ("O", "o", "Ο", "ο"):
+        return "0" + raw[1:], "Το αρχικό O/Ο αντικαταστάθηκε με 0"
+    if len(raw) == 8 and raw.isascii() and raw.isdigit():
+        return "0" + raw, "Προστέθηκε αρχικό 0 σε οκταψήφιο ΑΦΜ"
+    return raw, ""
+
+
 def validate_draft(frame, kind, category_mappings=None):
     category_mappings = category_mappings or {}
     headers = DRAFT_HEADERS[kind]
@@ -81,9 +98,10 @@ def validate_draft(frame, kind, category_mappings=None):
     old_col, new_col = (headers[7], headers[8])
     for index, row in df.iterrows():
         excel_row = index + 2
-        afm = clean_identifier(row["ΑΦΜ"])
+        afm, correction = normalize_afm(row["ΑΦΜ"])
+        df.at[index, "ΑΦΜ"] = afm
         if not valid_greek_afm(afm):
-            issues.append((excel_row, "ΑΦΜ", "Μη έγκυρο ή κενό ΑΦΜ"))
+            issues.append((excel_row, "ΑΦΜ", "Μη έγκυρο ή κενό ΑΦΜ μετά την κανονικοποίηση"))
         for col in ["ΠΡΟΜΗΘΕΥΤΗΣ", "ΣΟΥΠΕΡ ΜΑΡΚΕΤ", "ΚΑΤΗΓΟΡΙΑ", "ΠΡΟΪΟΝ"]:
             if pd.isna(row[col]) or not str(row[col]).strip():
                 issues.append((excel_row, col, "Υποχρεωτικό πεδίο"))
@@ -103,7 +121,7 @@ def validate_draft(frame, kind, category_mappings=None):
             if pd.isna(pd.to_datetime(row[col], errors="coerce", dayfirst=True)):
                 issues.append((excel_row, col, "Μη έγκυρη ή κενή ημερομηνία"))
     key_cols = ["ΑΦΜ", "ΣΟΥΠΕΡ ΜΑΡΚΕΤ", "ΠΡΟΪΟΝ", "BARCODE", headers[10]]
-    duplicate = df.assign(ΑΦΜ=df["ΑΦΜ"].map(clean_identifier)).duplicated(subset=key_cols, keep=False)
+    duplicate = df.duplicated(subset=key_cols, keep=False)
     for index in df.index[duplicate]:
         issues.append((index + 2, "ΔΙΠΛΟΤΥΠΟ", "Πιθανή διπλή εγγραφή μέσα στο DRAFT"))
     report = pd.DataFrame(issues, columns=["Γραμμή Excel", "Πεδίο", "Παρατήρηση"])
@@ -631,7 +649,8 @@ elif page == "🏢 Μητρώο Προμηθευτών":
             )
 
         if submitted:
-            afm = normalize(afm)
+            raw_afm = afm
+            afm, afm_correction = normalize_afm(afm)
             original_name = normalize(original_name)
             official_name = normalize(official_name)
 
@@ -667,9 +686,9 @@ elif page == "🏢 Μητρώο Προμηθευτών":
                     "Νέα δοκιμαστική καταχώριση"
                 )
 
-                st.success(
-                    "Ο προμηθευτής προστέθηκε επιτυχώς!"
-                )
+                st.success("Ο προμηθευτής προστέθηκε επιτυχώς!")
+                if afm_correction:
+                    st.info(f"ΑΦΜ: {raw_afm} → {afm}. {afm_correction}.")
 
     # --------------------------------------------------------
     # ΚΑΡΤΕΛΑ 3 — ΕΠΕΞΕΡΓΑΣΙΑ
@@ -742,7 +761,8 @@ elif page == "🏢 Μητρώο Προμηθευτών":
             )
 
         if save_edit:
-            new_afm = normalize(new_afm)
+            raw_new_afm = new_afm
+            new_afm, new_afm_correction = normalize_afm(new_afm)
             new_name = normalize(new_name)
             reason = reason.strip()
 
@@ -808,10 +828,9 @@ elif page == "🏢 Μητρώο Προμηθευτών":
 
                     selected[field] = changes[field]
 
-                st.success(
-                    "Οι αλλαγές αποθηκεύτηκαν "
-                    "στη δοκιμαστική συνεδρία!"
-                )
+                st.success("Οι αλλαγές αποθηκεύτηκαν στη δοκιμαστική συνεδρία!")
+                if new_afm_correction:
+                    st.info(f"ΑΦΜ: {raw_new_afm} → {new_afm}. {new_afm_correction}.")
 
                 st.rerun()
 
@@ -847,21 +866,18 @@ elif page == "🏢 Μητρώο Προμηθευτών":
         )
 
         if st.button("Έλεγχος εγκυρότητας"):
-            if valid_greek_afm(afm_check):
-                st.success(
-                    "Το ΑΦΜ έχει έγκυρο "
-                    "ψηφίο ελέγχου."
-                )
+            checked_afm, correction = normalize_afm(afm_check)
+            if valid_greek_afm(checked_afm):
+                st.success(f"Έγκυρο ψηφίο ελέγχου. Κανονικοποιημένο ΑΦΜ: {checked_afm}")
+                if correction:
+                    st.info(correction)
             else:
                 st.error(
                     "Το ΑΦΜ δεν περνά "
                     "τον μαθηματικό έλεγχο."
                 )
 
-        st.caption(
-            "Δεν πραγματοποιείται διασταύρωση "
-            "με την ΑΑΔΕ ή το VIES."
-        )
+        st.caption("Επιτρέπεται προσθήκη αρχικού 0 σε 8 ψηφία και διόρθωση O/Ο μόνο στην πρώτη θέση. Δεν πραγματοποιείται διασταύρωση με την ΑΑΔΕ ή το VIES.")
 
 
 # ============================================================
