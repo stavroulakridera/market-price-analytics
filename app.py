@@ -1,7 +1,7 @@
 
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from io import BytesIO
 import re
 
@@ -320,10 +320,29 @@ def price_view(increase=True):
     supplier = c.selectbox("Προμηθευτής", ["Όλοι"] + sorted(df["Προμηθευτής"].unique().tolist()), key=f"supplier_{increase}")
     d, e = st.columns([2, 1])
     search = d.text_input("🔍 Αναζήτηση προϊόντος ή προμηθευτή", key=f"search_{increase}")
-    date_range = e.date_input(
-        "Περίοδος", value=(df["Ημερομηνία"].min().date(), df["Ημερομηνία"].max().date()),
-        key=f"dates_{increase}",
-    )
+    if increase:
+        # Κάθε εγγραφή ομαδοποιείται στην Τετάρτη της ημερολογιακής εβδομάδας της.
+        wednesdays = df["Ημερομηνία"].dt.normalize() + pd.to_timedelta(
+            2 - df["Ημερομηνία"].dt.weekday, unit="D"
+        )
+        df = df.assign(_week_wednesday=wednesdays)
+        available_weeks = sorted(df["_week_wednesday"].dt.date.unique(), reverse=True)
+        selected_wednesday = e.selectbox(
+            "Περίοδος (εβδομάδα — Τετάρτη)",
+            options=[None] + available_weeks,
+            format_func=lambda x: "Όλες οι εβδομάδες" if x is None else (
+                f"{(x - timedelta(days=2)):%d/%m/%Y} – "
+                f"{(x + timedelta(days=4)):%d/%m/%Y}  |  Τετάρτη {x:%d/%m/%Y}"
+            ),
+            key="week_increase",
+        )
+        if selected_wednesday is not None:
+            st.caption(f"Ημερομηνία αναφοράς επιλεγμένης εβδομάδας: {selected_wednesday:%d/%m/%Y}")
+    else:
+        date_range = e.date_input(
+            "Περίοδος", value=(df["Ημερομηνία"].min().date(), df["Ημερομηνία"].max().date()),
+            key="dates_decrease",
+        )
     if chain != "Όλες":
         df = df[df["Αλυσίδα"] == chain]
     if category != "Όλες":
@@ -333,7 +352,10 @@ def price_view(increase=True):
     if search.strip():
         df = df[df["Προϊόν"].str.contains(search.strip(), case=False, regex=False) |
                 df["Προμηθευτής"].str.contains(search.strip(), case=False, regex=False)]
-    if isinstance(date_range, (tuple, list)) and len(date_range) == 2:
+    if increase:
+        if selected_wednesday is not None:
+            df = df[df["_week_wednesday"].dt.date == selected_wednesday]
+    elif isinstance(date_range, (tuple, list)) and len(date_range) == 2:
         start, end = date_range
         df = df[df["Ημερομηνία"].dt.date.between(start, end)]
 
