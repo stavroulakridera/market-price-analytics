@@ -100,8 +100,8 @@ def validate_draft(frame, kind, category_mappings=None):
         excel_row = index + 2
         afm, correction = normalize_afm(row["ΑΦΜ"])
         df.at[index, "ΑΦΜ"] = afm
-        if not valid_greek_afm(afm):
-            issues.append((excel_row, "ΑΦΜ", "Μη έγκυρο ή κενό ΑΦΜ μετά την κανονικοποίηση"))
+        if not supplier_identifier_valid(afm):
+            issues.append((excel_row, "ΑΦΜ", "Μη έγκυρο ή κενό αναγνωριστικό μετά την κανονικοποίηση"))
         for col in ["ΠΡΟΜΗΘΕΥΤΗΣ", "ΣΟΥΠΕΡ ΜΑΡΚΕΤ", "ΚΑΤΗΓΟΡΙΑ", "ΠΡΟΪΟΝ"]:
             if pd.isna(row[col]) or not str(row[col]).strip():
                 issues.append((excel_row, col, "Υποχρεωτικό πεδίο"))
@@ -243,18 +243,18 @@ def supplier_count():
 def fetch_suppliers():
     with connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT id, afm, name, created_at FROM mpa.suppliers ORDER BY name, id")
-            return [dict(zip(("id", "afm", "name", "created_at"), row)) for row in cur.fetchall()]
+            cur.execute("SELECT id, afm, name, created_at, is_active FROM mpa.suppliers ORDER BY name, id")
+            return [dict(zip(("id", "afm", "name", "created_at", "is_active"), row)) for row in cur.fetchall()]
 
 
 def fetch_supplier_history():
     with connect() as conn:
         with conn.cursor() as cur:
             cur.execute("""SELECT changed_at, supplier_id, old_afm, new_afm,
-                                  old_name, new_name, reason, changed_by
+                                  old_name, new_name, reason, changed_by, old_is_active, new_is_active
                            FROM mpa.supplier_history ORDER BY changed_at DESC, id DESC LIMIT 1000""")
             return [dict(zip(("Ημερομηνία", "ID", "Παλαιό ΑΦΜ", "Νέο ΑΦΜ",
-                              "Παλαιά επωνυμία", "Νέα επωνυμία", "Αιτιολογία", "Χρήστης"), row))
+                              "Παλαιά επωνυμία", "Νέα επωνυμία", "Αιτιολογία", "Χρήστης", "Παλαιά κατάσταση", "Νέα κατάσταση"), row))
                     for row in cur.fetchall()]
 
 
@@ -270,33 +270,46 @@ def add_supplier_db(afm, name, reason, username):
                         (supplier_id, afm, name, reason, username))
 
 
-def edit_supplier_db(supplier_id, afm, name, reason, username):
+def edit_supplier_db(supplier_id, afm, name, is_active, reason, username):
+    """Atomic supplier edit and history write; keep stable supplier ID."""
     with connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT afm, name FROM mpa.suppliers WHERE id = %s FOR UPDATE", (supplier_id,))
+            cur.execute("SELECT afm, name, is_active FROM mpa.suppliers WHERE id = %s FOR UPDATE", (supplier_id,))
             old = cur.fetchone()
             if old is None:
                 raise ValueError("Ο προμηθευτής δεν υπάρχει πλέον.")
-            if old == (afm, name):
+            if old == (afm, name, is_active):
                 return False
-            cur.execute("UPDATE mpa.suppliers SET afm = %s, name = %s WHERE id = %s",
-                        (afm, name, supplier_id))
+            cur.execute("""UPDATE mpa.suppliers
+                           SET afm = %s, name = %s, is_active = %s
+                           WHERE id = %s""", (afm, name, is_active, supplier_id))
             cur.execute("""INSERT INTO mpa.supplier_history
-                        (supplier_id, old_afm, new_afm, old_name, new_name, reason, changed_by)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-                        (supplier_id, old[0], afm, old[1], name, reason, username))
+                        (supplier_id, old_afm, new_afm, old_name, new_name,
+                         old_is_active, new_is_active, reason, changed_by)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                        (supplier_id, old[0], afm, old[1], name,
+                         old[2], is_active, reason, username))
             return True
 
 
 def unknown_draft_suppliers(frame):
-    """Read-only check; never imports draft rows."""
-    known = {supplier_key(s["afm"]) for s in fetch_suppliers()}
+    """Read-only registry check: unknown OR inactive suppliers block import."""
+    registry = {}
+    for item in fetch_suppliers():
+        registry.setdefault(supplier_key(item["afm"]), []).append(item)
     found = {}
     for _, row in frame.iterrows():
         key = supplier_key(row.get("ΑΦΜ"))
-        if key and key not in known:
-            found.setdefault(key, {"ΑΦΜ": key, "ΠΡΟΜΗΘΕΥΤΗΣ": str(row.get("ΠΡΟΜΗΘΕΥΤΗΣ", "")),
-                                   "ΣΟΥΠΕΡ ΜΑΡΚΕΤ": str(row.get("ΣΟΥΠΕΡ ΜΑΡΚΕΤ", ""))})
+        if not key:
+            continue
+        matches = registry.get(key, [])
+        if not matches or not any(s["is_active"] for s in matches):
+            found.setdefault(key, {
+                "ΑΦΜ": key,
+                "ΠΡΟΜΗΘΕΥΤΗΣ": str(row.get("ΠΡΟΜΗΘΕΥΤΗΣ", "")),
+                "ΣΟΥΠΕΡ ΜΑΡΚΕΤ": str(row.get("ΣΟΥΠΕΡ ΜΑΡΚΕΤ", "")),
+                "Πρόβλημα": "Ανενεργός προμηθευτής" if matches else "Άγνωστος προμηθευτής"
+            })
     return list(found.values())
 
 
@@ -589,19 +602,27 @@ elif page == "🏢 Μητρώο Προμηθευτών":
         st.error("Αδυναμία ανάγνωσης Μητρώου από τη βάση. Δεν έγιναν αλλαγές.")
         st.stop()
 
-    c1, c2 = st.columns(2)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Σύνολο Προμηθευτών", len(suppliers))
-    c2.metric("Καταγεγραμμένες αλλαγές (έως 1.000)", len(history))
+    c2.metric("Ενεργοί", sum(s["is_active"] for s in suppliers))
+    c3.metric("Ανενεργοί", sum(not s["is_active"] for s in suppliers))
+    c4.metric("Αλλαγές (έως 1.000)", len(history))
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "📋 Προμηθευτές", "➕ Νέος Προμηθευτής", "✏️ Επεξεργασία",
         "🕘 Ιστορικό Αλλαγών", "🔍 Έλεγχος ΑΦΜ"])
 
     with tab1:
         search = st.text_input("🔍 Αναζήτηση ΑΦΜ ή επωνυμίας").strip().casefold()
-        filtered = [s for s in suppliers if search in (s["afm"] + " " + s["name"]).casefold()]
+        status_filter = st.selectbox("Κατάσταση προμηθευτών", ["Όλοι", "Ενεργοί", "Ανενεργοί"])
+        filtered = [s for s in suppliers
+                    if search in (s["afm"] + " " + s["name"]).casefold()
+                    and (status_filter == "Όλοι"
+                         or (status_filter == "Ενεργοί" and s["is_active"])
+                         or (status_filter == "Ανενεργοί" and not s["is_active"]))]
         st.dataframe(pd.DataFrame([{"ID": s["id"], "ΑΦΜ": s["afm"],
-                                    "ΕΠΩΝΥΜΙΑ ΠΡΟΜΗΘΕΥΤΗ": s["name"]} for s in filtered],
-                                   columns=["ID", "ΑΦΜ", "ΕΠΩΝΥΜΙΑ ΠΡΟΜΗΘΕΥΤΗ"]),
+                                    "ΕΠΩΝΥΜΙΑ ΠΡΟΜΗΘΕΥΤΗ": s["name"],
+                                    "ΚΑΤΑΣΤΑΣΗ": "Ενεργός" if s["is_active"] else "Ανενεργός"} for s in filtered],
+                                   columns=["ID", "ΑΦΜ", "ΕΠΩΝΥΜΙΑ ΠΡΟΜΗΘΕΥΤΗ", "ΚΑΤΑΣΤΑΣΗ"]),
                      use_container_width=True, hide_index=True)
         st.caption(f"Εμφανίζονται {len(filtered)} εγγραφές.")
 
@@ -643,11 +664,14 @@ elif page == "🏢 Μητρώο Προμηθευτών":
             with st.form(f"edit_supplier_postgres_{selected_id}"):
                 new_afm = st.text_input("ΑΦΜ / VAT ID", value=selected["afm"])
                 new_name = st.text_input("Επωνυμία προμηθευτή", value=selected["name"])
+                new_status = st.selectbox("Κατάσταση", ["Ενεργός", "Ανενεργός"],
+                                          index=0 if selected["is_active"] else 1)
                 reason = st.text_area("Αιτιολογία αλλαγής (υποχρεωτική)")
                 submitted = st.form_submit_button("💾 Αποθήκευση αλλαγών")
             if submitted:
                 afm = supplier_key(new_afm)
                 name = new_name.strip()
+                is_active = (new_status == "Ενεργός")
                 if not afm or not name or not reason.strip():
                     st.error("Συμπλήρωσε ΑΦΜ, επωνυμία και αιτιολογία.")
                 elif not supplier_identifier_valid(afm):
@@ -656,7 +680,7 @@ elif page == "🏢 Μητρώο Προμηθευτών":
                     st.error("Το ΑΦΜ ανήκει ήδη σε άλλον προμηθευτή.")
                 else:
                     try:
-                        changed = edit_supplier_db(selected_id, afm, name, reason.strip(), current_user["username"])
+                        changed = edit_supplier_db(selected_id, afm, name, is_active, reason.strip(), current_user["username"])
                         if changed:
                             st.success("Η διόρθωση καταγράφηκε στη βάση και στο ιστορικό.")
                             st.rerun()
@@ -773,7 +797,7 @@ elif page == "📥 Εισαγωγή Excel":
             st.error("Δεν έγινε έλεγχος μητρώου λόγω σφάλματος σύνδεσης. Η εισαγωγή μπλοκάρεται.")
             st.stop()
         if missing_suppliers:
-            st.error(f"Εντοπίστηκαν {len(missing_suppliers)} άγνωστοι προμηθευτές. Η εισαγωγή μπλοκάρεται.")
+            st.error(f"Εντοπίστηκαν {len(missing_suppliers)} άγνωστοι ή ανενεργοί προμηθευτές. Η εισαγωγή μπλοκάρεται.")
             st.dataframe(pd.DataFrame(missing_suppliers), hide_index=True, use_container_width=True)
         if report.empty and not missing_suppliers:
             st.success("Οι έλεγχοι πέρασαν. Η αποθήκευση αρχείων δεν έχει ενεργοποιηθεί.")
