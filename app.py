@@ -249,7 +249,7 @@ def increase_table_demo(data):
         latest = float(item["Νέα τιμή"])
         baseline = round(previous * (0.95 + (i % 4) * 0.02), 2)
         rows.append({
-            INCREASE_COLUMNS[0]: item["Ημερομηνία"].strftime("%d/%m/%Y"),
+            INCREASE_COLUMNS[0]: (item["_week_wednesday"] if "_week_wednesday" in item.index else item["Ημερομηνία"]).strftime("%d/%m/%Y"),
             INCREASE_COLUMNS[1]: "DEMO",
             INCREASE_COLUMNS[2]: item["Προμηθευτής"],
             INCREASE_COLUMNS[3]: item["Προμηθευτής"],
@@ -321,23 +321,23 @@ def price_view(increase=True):
     d, e = st.columns([2, 1])
     search = d.text_input("🔍 Αναζήτηση προϊόντος ή προμηθευτή", key=f"search_{increase}")
     if increase:
-        # Κάθε εγγραφή ομαδοποιείται στην Τετάρτη της ημερολογιακής εβδομάδας της.
+        # Περίοδος Πέμπτη–Τετάρτη: κάθε ημερομηνία αντιστοιχεί
+        # στην αμέσως επόμενη (ή ίδια) Τετάρτη.
         wednesdays = df["Ημερομηνία"].dt.normalize() + pd.to_timedelta(
-            2 - df["Ημερομηνία"].dt.weekday, unit="D"
+            (2 - df["Ημερομηνία"].dt.weekday) % 7, unit="D"
         )
         df = df.assign(_week_wednesday=wednesdays)
         available_weeks = sorted(df["_week_wednesday"].dt.date.unique(), reverse=True)
         selected_wednesday = e.selectbox(
-            "Περίοδος (εβδομάδα — Τετάρτη)",
+            "Περίοδος Ανατιμήσεων (Πέμπτη–Τετάρτη)",
             options=[None] + available_weeks,
             format_func=lambda x: "Όλες οι εβδομάδες" if x is None else (
-                f"{(x - timedelta(days=2)):%d/%m/%Y} – "
-                f"{(x + timedelta(days=4)):%d/%m/%Y}  |  Τετάρτη {x:%d/%m/%Y}"
+                f"{(x - timedelta(days=6)):%d/%m/%Y} – {x:%d/%m/%Y}"
             ),
             key="week_increase",
         )
         if selected_wednesday is not None:
-            st.caption(f"Ημερομηνία αναφοράς επιλεγμένης εβδομάδας: {selected_wednesday:%d/%m/%Y}")
+            st.caption(f"Ημερομηνία αναφοράς: {selected_wednesday:%d/%m/%Y} (Τετάρτη)")
     else:
         date_range = e.date_input(
             "Περίοδος", value=(df["Ημερομηνία"].min().date(), df["Ημερομηνία"].max().date()),
