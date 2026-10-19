@@ -130,6 +130,9 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+from auth import require_login, admin_screen
+current_user = require_login()
+
 st.markdown("""
 <style>
 .block-container {
@@ -457,11 +460,16 @@ with st.sidebar:
             "📊 Στατιστικά & Αναφορές",
             "🕘 Ιστορικό Εισαγωγών",
             "⚙️ Ρυθμίσεις"
-        ],
+        ] + (["👥 Διαχείριση Χρηστών"] if current_user["role"] == "admin" else []),
         label_visibility="collapsed"
     )
 
     st.divider()
+    st.caption(f"Συνδεδεμένος: {current_user['username']} ({current_user['role']})")
+    if st.button("🚪 Αποσύνδεση"):
+        st.session_state.pop("auth_username", None)
+        st.session_state.pop("auth_last_seen", None)
+        st.rerun()
     st.caption("Market Price Analytics | DEMO")
 
 
@@ -987,3 +995,6 @@ elif page == "⚙️ Ρυθμίσεις":
         "Δεν επιτρέπεται η καταχώριση "
         "πραγματικών υπηρεσιακών δεδομένων."
     )
+
+elif page == "👥 Διαχείριση Χρηστών":
+    admin_screen(current_user)
