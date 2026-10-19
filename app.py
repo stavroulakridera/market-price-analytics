@@ -130,7 +130,11 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-from auth import require_login, admin_screen
+# Controlled migration: keep existing SQLite login until explicitly enabled.
+if st.secrets.get("MPA_AUTH_BACKEND", "sqlite").lower() == "postgres":
+    from auth_postgres import require_login, admin_screen
+else:
+    from auth import require_login, admin_screen
 current_user = require_login()
 
 st.markdown("""
