@@ -48,9 +48,10 @@ def init_auth():
             username = os.environ.get('MPA_BOOTSTRAP_ADMIN_USERNAME', '').strip().lower()
             password = os.environ.get('MPA_BOOTSTRAP_ADMIN_PASSWORD', '')
             if username and len(password) >= 12 and re.fullmatch(r'[a-zA-Z0-9_.-]{3,50}', username):
-                conn.execute('INSERT INTO users VALUES (?,?,?,?,1,1,0,0,?)',
-                             (username, 'Διαχειριστής', PH.hash(password), 'admin', _now()))
-                _audit(conn, username, 'bootstrap_admin', username)
+                cursor = conn.execute('INSERT OR IGNORE INTO users VALUES (?,?,?,?,1,1,0,0,?)',
+                                      (username, 'Διαχειριστής', PH.hash(password), 'admin', _now()))
+                if cursor.rowcount == 1:
+                    _audit(conn, username, 'bootstrap_admin', username)
 
 
 def _now():
