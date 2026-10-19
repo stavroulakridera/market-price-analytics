@@ -207,59 +207,97 @@ def valid_greek_afm(afm):
     return (total % 11) % 10 == int(afm[8])
 
 
-def next_supplier_id():
-    return max(
-        (s["ID"] for s in st.session_state.suppliers),
-        default=0
-    ) + 1
+# Persistent supplier registry. All database writes use transactions.
+from db import connect
+from psycopg.errors import UniqueViolation, CheckViolation, ForeignKeyViolation
 
 
-def add_history(supplier_id, afm, field, old, new, reason):
-    st.session_state.supplier_history.append({
-        "ΗΜΕΡΟΜΗΝΙΑ (UTC)": datetime.now(
-            timezone.utc
-        ).strftime("%d/%m/%Y %H:%M:%S"),
-        "ID ΠΡΟΜΗΘΕΥΤΗ": supplier_id,
-        "ΑΦΜ": afm,
-        "ΠΕΔΙΟ": field,
-        "ΠΑΛΙΑ ΤΙΜΗ": str(old),
-        "ΝΕΑ ΤΙΜΗ": str(new),
-        "ΑΙΤΙΟΛΟΓΙΑ": reason,
-        "ΧΡΗΣΤΗΣ": "DEMO USER"
-    })
+def supplier_key(value):
+    """Normalize Greek first-position transcription errors; preserve foreign VAT IDs."""
+    raw = clean_identifier(value).strip().upper()
+    raw = "".join(raw.split())
+    if len(raw) == 8 and raw.isascii() and raw.isdigit():
+        return "0" + raw
+    if len(raw) == 9 and raw[0] in ("O", "Ο") and raw[1:].isascii() and raw[1:].isdigit():
+        return "0" + raw[1:]
+    return raw
 
 
-# ============================================================
-# ΔΟΚΙΜΑΣΤΙΚΑ ΔΕΔΟΜΕΝΑ
-# ============================================================
-
-if "suppliers" not in st.session_state:
-    st.session_state.suppliers = [
-        {
-            "ID": 1,
-            "ΑΦΜ": "000000000",
-            "ΟΝΟΜΑΣΙΑ ΟΠΩΣ ΗΡΘΕ": "ΔΟΚΙΜΑΣΤΙΚΟΣ Α",
-            "ΠΡΟΜΗΘΕΥΤΗΣ": "ΔΟΚΙΜΑΣΤΙΚΟΣ ΠΡΟΜΗΘΕΥΤΗΣ Α",
-            "ΧΩΡΑ": "Ελλάδα"
-        },
-        {
-            "ID": 2,
-            "ΑΦΜ": "123456789",
-            "ΟΝΟΜΑΣΙΑ ΟΠΩΣ ΗΡΘΕ": "ΔΟΚΙΜΑΣΤΙΚΟΣ Β",
-            "ΠΡΟΜΗΘΕΥΤΗΣ": "ΔΟΚΙΜΑΣΤΙΚΟΣ ΠΡΟΜΗΘΕΥΤΗΣ Β",
-            "ΧΩΡΑ": "Ελλάδα"
-        }
-    ]
+def supplier_identifier_valid(value):
+    value = supplier_key(value)
+    if not value or len(value) > 50:
+        return False
+    if len(value) == 9 and value.isascii() and value.isdigit():
+        return valid_greek_afm(value)
+    # Non-Greek identifiers: no Greek checksum, require letters/digits and review.
+    return bool(re.fullmatch(r"[A-Z0-9]+", value))
 
 
-for supplier in st.session_state.suppliers:
-    supplier.setdefault("ΟΝΟΜΑΣΙΑ ΟΠΩΣ ΗΡΘΕ", supplier.get("ΠΡΟΜΗΘΕΥΤΗΣ", ""))
-    supplier.setdefault("ΧΩΡΑ", "Ελλάδα")
-    supplier.pop("ΚΑΤΑΣΤΑΣΗ", None)  # Παλιές συνεδρίες χωρίς πεδίο κατάστασης
+def supplier_count():
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM mpa.suppliers")
+            return cur.fetchone()[0]
 
-if "supplier_history" not in st.session_state:
-    st.session_state.supplier_history = []
 
+def fetch_suppliers():
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, afm, name, created_at FROM mpa.suppliers ORDER BY name, id")
+            return [dict(zip(("id", "afm", "name", "created_at"), row)) for row in cur.fetchall()]
+
+
+def fetch_supplier_history():
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT changed_at, supplier_id, old_afm, new_afm,
+                                  old_name, new_name, reason, changed_by
+                           FROM mpa.supplier_history ORDER BY changed_at DESC, id DESC LIMIT 1000""")
+            return [dict(zip(("Ημερομηνία", "ID", "Παλαιό ΑΦΜ", "Νέο ΑΦΜ",
+                              "Παλαιά επωνυμία", "Νέα επωνυμία", "Αιτιολογία", "Χρήστης"), row))
+                    for row in cur.fetchall()]
+
+
+def add_supplier_db(afm, name, reason, username):
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO mpa.suppliers (afm, name) VALUES (%s, %s) RETURNING id",
+                        (afm, name))
+            supplier_id = cur.fetchone()[0]
+            cur.execute("""INSERT INTO mpa.supplier_history
+                        (supplier_id, old_afm, new_afm, old_name, new_name, reason, changed_by)
+                        VALUES (%s, NULL, %s, NULL, %s, %s, %s)""",
+                        (supplier_id, afm, name, reason, username))
+
+
+def edit_supplier_db(supplier_id, afm, name, reason, username):
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT afm, name FROM mpa.suppliers WHERE id = %s FOR UPDATE", (supplier_id,))
+            old = cur.fetchone()
+            if old is None:
+                raise ValueError("Ο προμηθευτής δεν υπάρχει πλέον.")
+            if old == (afm, name):
+                return False
+            cur.execute("UPDATE mpa.suppliers SET afm = %s, name = %s WHERE id = %s",
+                        (afm, name, supplier_id))
+            cur.execute("""INSERT INTO mpa.supplier_history
+                        (supplier_id, old_afm, new_afm, old_name, new_name, reason, changed_by)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                        (supplier_id, old[0], afm, old[1], name, reason, username))
+            return True
+
+
+def unknown_draft_suppliers(frame):
+    """Read-only check; never imports draft rows."""
+    known = {supplier_key(s["afm"]) for s in fetch_suppliers()}
+    found = {}
+    for _, row in frame.iterrows():
+        key = supplier_key(row.get("ΑΦΜ"))
+        if key and key not in known:
+            found.setdefault(key, {"ΑΦΜ": key, "ΠΡΟΜΗΘΕΥΤΗΣ": str(row.get("ΠΡΟΜΗΘΕΥΤΗΣ", "")),
+                                   "ΣΟΥΠΕΡ ΜΑΡΚΕΤ": str(row.get("ΣΟΥΠΕΡ ΜΑΡΚΕΤ", ""))})
+    return list(found.values())
 
 
 # ============================================================
@@ -460,6 +498,10 @@ def price_view(increase=True):
     else:
         st.info("Δεν υπάρχουν συγκεντρωτικά στοιχεία για τα επιλεγμένα φίλτρα.")
 
+if "category_mappings" not in st.session_state:
+    st.session_state.category_mappings = {}
+
+
 # ============================================================
 # ΠΛΕΥΡΙΚΟ ΜΕΝΟΥ
 # ============================================================
@@ -508,7 +550,7 @@ if page == "🏠 Αρχική":
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Ανατιμήσεις", len(inc))
     c2.metric("Υποτιμήσεις", len(dec))
-    c3.metric("Προμηθευτές μητρώου", len(st.session_state.suppliers))
+    c3.metric("Προμηθευτές μητρώου", supplier_count())
     c4.metric("Ανατιμήσεις > 3%", int((inc["Μεταβολή %"] > 3).sum()))
     st.divider()
     left, right = st.columns(2)
@@ -538,355 +580,121 @@ elif page == "📉 Υποτιμήσεις":
 # ============================================================
 
 elif page == "🏢 Μητρώο Προμηθευτών":
-
     st.title("🏢 Μητρώο Προμηθευτών")
-    st.caption(
-        "Δοκιμαστική διαχείριση προμηθευτών "
-        "με ιστορικό αλλαγών"
-    )
-
-    suppliers = st.session_state.suppliers
+    st.caption("Στοιχεία από Supabase PostgreSQL · Admin και Analyst μπορούν να καταχωρίζουν και να διορθώνουν")
+    try:
+        suppliers = fetch_suppliers()
+        history = fetch_supplier_history()
+    except Exception:
+        st.error("Αδυναμία ανάγνωσης Μητρώου από τη βάση. Δεν έγιναν αλλαγές.")
+        st.stop()
 
     c1, c2 = st.columns(2)
     c1.metric("Σύνολο Προμηθευτών", len(suppliers))
-    c2.metric("Αλλαγές", len(st.session_state.supplier_history))
-
-    st.divider()
-
+    c2.metric("Καταγεγραμμένες αλλαγές (έως 1.000)", len(history))
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "📋 Προμηθευτές",
-        "➕ Νέος Προμηθευτής",
-        "✏️ Επεξεργασία",
-        "🕘 Ιστορικό Αλλαγών",
-        "🔍 Έλεγχος ΑΦΜ"
-    ])
-
-    # --------------------------------------------------------
-    # ΚΑΡΤΕΛΑ 1 — ΠΡΟΜΗΘΕΥΤΕΣ
-    # --------------------------------------------------------
+        "📋 Προμηθευτές", "➕ Νέος Προμηθευτής", "✏️ Επεξεργασία",
+        "🕘 Ιστορικό Αλλαγών", "🔍 Έλεγχος ΑΦΜ"])
 
     with tab1:
-        st.subheader("Κατάλογος Προμηθευτών")
-
-        search = st.text_input(
-            "🔍 Αναζήτηση ΑΦΜ ή επωνυμίας"
-        )
-
-        filtered = []
-
-        for s in suppliers:
-            searchable = " ".join([
-                s["ΑΦΜ"],
-                s["ΟΝΟΜΑΣΙΑ ΟΠΩΣ ΗΡΘΕ"],
-                s["ΠΡΟΜΗΘΕΥΤΗΣ"]
-            ]).lower()
-
-            if search.lower() in searchable:
-                filtered.append(s)
-
-        columns = [
-            "ID",
-            "ΑΦΜ",
-            "ΟΝΟΜΑΣΙΑ ΟΠΩΣ ΗΡΘΕ",
-            "ΠΡΟΜΗΘΕΥΤΗΣ",
-            "ΧΩΡΑ"
-        ]
-
-        st.dataframe(
-            pd.DataFrame(filtered, columns=columns),
-            use_container_width=True,
-            hide_index=True
-        )
-
-        st.caption(
-            f"Εμφανίζονται {len(filtered)} εγγραφές."
-        )
-
-        duplicate_afms = {
-            s["ΑΦΜ"]
-            for s in suppliers
-            if sum(
-                x["ΑΦΜ"] == s["ΑΦΜ"]
-                for x in suppliers
-            ) > 1
-        }
-
-        if duplicate_afms:
-            st.error(
-                "Εντοπίστηκαν διπλότυπα ΑΦΜ: "
-                + ", ".join(sorted(duplicate_afms))
-            )
-
-    # --------------------------------------------------------
-    # ΚΑΡΤΕΛΑ 2 — ΝΕΟΣ ΠΡΟΜΗΘΕΥΤΗΣ
-    # --------------------------------------------------------
+        search = st.text_input("🔍 Αναζήτηση ΑΦΜ ή επωνυμίας").strip().casefold()
+        filtered = [s for s in suppliers if search in (s["afm"] + " " + s["name"]).casefold()]
+        st.dataframe(pd.DataFrame([{"ID": s["id"], "ΑΦΜ": s["afm"],
+                                    "ΕΠΩΝΥΜΙΑ ΠΡΟΜΗΘΕΥΤΗ": s["name"]} for s in filtered],
+                                   columns=["ID", "ΑΦΜ", "ΕΠΩΝΥΜΙΑ ΠΡΟΜΗΘΕΥΤΗ"]),
+                     use_container_width=True, hide_index=True)
+        st.caption(f"Εμφανίζονται {len(filtered)} εγγραφές.")
 
     with tab2:
-        st.subheader("➕ Καταχώριση Προμηθευτή")
-
-        with st.form(
-            "new_supplier_form",
-            clear_on_submit=True
-        ):
-            afm = st.text_input("ΑΦΜ / VAT ID")
-
-            original_name = st.text_input(
-                "Ονομασία όπως ήρθε"
-            )
-
-            official_name = st.text_input(
-                "Επίσημη επωνυμία"
-            )
-
-            country = st.selectbox(
-                "Χώρα",
-                ["Ελλάδα", "Εξωτερικό"]
-            )
-
-            submitted = st.form_submit_button(
-                "💾 Αποθήκευση",
-                type="primary"
-            )
-
+        st.subheader("➕ Νέος Προμηθευτής")
+        with st.form("add_supplier_postgres", clear_on_submit=False):
+            raw_afm = st.text_input("ΑΦΜ / VAT ID", key="supplier_new_afm")
+            raw_name = st.text_input("Επωνυμία προμηθευτή", key="supplier_new_name")
+            reason = st.text_area("Αιτιολογία καταχώρισης", key="supplier_new_reason")
+            submitted = st.form_submit_button("💾 Αποθήκευση στη βάση")
         if submitted:
-            raw_afm = afm
-            afm, afm_correction = normalize_afm(afm)
-            original_name = normalize(original_name)
-            official_name = normalize(official_name)
-
-            if not afm or not original_name or not official_name:
-                st.error("Συμπλήρωσε όλα τα υποχρεωτικά πεδία.")
-
-            elif any(s["ΑΦΜ"] == afm for s in suppliers):
-                st.error("Το ΑΦΜ υπάρχει ήδη στο μητρώο.")
-
-            elif country == "Ελλάδα" and not valid_greek_afm(afm):
-                st.error(
-                    "Το ελληνικό ΑΦΜ δεν περνά "
-                    "τον μαθηματικό έλεγχο."
-                )
-
+            afm = supplier_key(raw_afm)
+            name = raw_name.strip()
+            if not afm or not name or not reason.strip():
+                st.error("Συμπλήρωσε ΑΦΜ, επωνυμία και αιτιολογία.")
+            elif not supplier_identifier_valid(afm):
+                st.error("Το ΑΦΜ δεν περνά τον έλεγχο μορφής/ελληνικού ψηφίου ελέγχου.")
+            elif any(supplier_key(s["afm"]) == afm for s in suppliers):
+                st.error("Το ΑΦΜ υπάρχει ήδη στο μητρώο (μετά την κανονικοποίηση).")
             else:
-                supplier_id = next_supplier_id()
-
-                suppliers.append({
-                    "ID": supplier_id,
-                    "ΑΦΜ": afm,
-                    "ΟΝΟΜΑΣΙΑ ΟΠΩΣ ΗΡΘΕ": original_name,
-                    "ΠΡΟΜΗΘΕΥΤΗΣ": official_name,
-                    "ΧΩΡΑ": country
-                })
-
-                add_history(
-                    supplier_id,
-                    afm,
-                    "ΔΗΜΙΟΥΡΓΙΑ",
-                    "",
-                    official_name,
-                    "Νέα δοκιμαστική καταχώριση"
-                )
-
-                st.success("Ο προμηθευτής προστέθηκε επιτυχώς!")
-                if afm_correction:
-                    st.info(f"ΑΦΜ: {raw_afm} → {afm}. {afm_correction}.")
-
-    # --------------------------------------------------------
-    # ΚΑΡΤΕΛΑ 3 — ΕΠΕΞΕΡΓΑΣΙΑ
-    # --------------------------------------------------------
+                try:
+                    add_supplier_db(afm, name, reason.strip(), current_user["username"])
+                    st.success("Ο προμηθευτής και το ιστορικό αποθηκεύτηκαν στο Supabase.")
+                    st.rerun()
+                except UniqueViolation:
+                    st.error("Το ΑΦΜ υπάρχει ήδη στη βάση.")
+                except Exception:
+                    st.error("Η αποθήκευση απέτυχε. Δεν καταχωρίστηκε μερική αλλαγή.")
 
     with tab3:
         st.subheader("✏️ Επεξεργασία Προμηθευτή")
-
-        supplier_options = {
-            f'{s["ID"]} | {s["ΑΦΜ"]} | {s["ΠΡΟΜΗΘΕΥΤΗΣ"]}':
-            s["ID"]
-            for s in suppliers
-        }
-
-        selected_label = st.selectbox(
-            "Επίλεξε προμηθευτή",
-            list(supplier_options.keys())
-        )
-
-        selected_id = supplier_options[selected_label]
-
-        selected = next(
-            s for s in suppliers
-            if s["ID"] == selected_id
-        )
-
-        st.info(
-            "Η αρχική ονομασία διατηρείται "
-            "και δεν τροποποιείται."
-        )
-
-        st.text_input(
-            "Ονομασία όπως ήρθε",
-            value=selected["ΟΝΟΜΑΣΙΑ ΟΠΩΣ ΗΡΘΕ"],
-            disabled=True
-        )
-
-        with st.form(
-            f"edit_supplier_{selected_id}"
-        ):
-            new_afm = st.text_input(
-                "ΑΦΜ / VAT ID",
-                value=selected["ΑΦΜ"]
-            )
-
-            new_name = st.text_input(
-                "Επίσημη επωνυμία",
-                value=selected["ΠΡΟΜΗΘΕΥΤΗΣ"]
-            )
-
-            new_country = st.selectbox(
-                "Χώρα",
-                ["Ελλάδα", "Εξωτερικό"],
-                index=(
-                    0 if selected["ΧΩΡΑ"] == "Ελλάδα"
-                    else 1
-                )
-            )
-
-            reason = st.text_area(
-                "Αιτιολογία αλλαγής",
-                placeholder=(
-                    "Περιέγραψε γιατί γίνεται η διόρθωση"
-                )
-            )
-
-            save_edit = st.form_submit_button(
-                "💾 Αποθήκευση αλλαγών",
-                type="primary"
-            )
-
-        if save_edit:
-            raw_new_afm = new_afm
-            new_afm, new_afm_correction = normalize_afm(new_afm)
-            new_name = normalize(new_name)
-            reason = reason.strip()
-
-            changes = {
-                "ΑΦΜ": new_afm,
-                "ΠΡΟΜΗΘΕΥΤΗΣ": new_name,
-                "ΧΩΡΑ": new_country
-            }
-
-            changed_fields = [
-                field
-                for field, value in changes.items()
-                if selected[field] != value
-            ]
-
-            duplicate = any(
-                s["ΑΦΜ"] == new_afm
-                and s["ID"] != selected_id
-                for s in suppliers
-            )
-
-            if not changed_fields:
-                st.info("Δεν πραγματοποιήθηκε κάποια αλλαγή.")
-
-            elif not reason:
-                st.error(
-                    "Η αιτιολογία αλλαγής είναι υποχρεωτική."
-                )
-
-            elif not new_afm or not new_name:
-                st.error(
-                    "Το ΑΦΜ και η επωνυμία "
-                    "δεν μπορούν να είναι κενά."
-                )
-
-            elif duplicate:
-                st.error(
-                    "Το νέο ΑΦΜ ανήκει ήδη "
-                    "σε άλλον προμηθευτή."
-                )
-
-            elif (
-                new_country == "Ελλάδα"
-                and not valid_greek_afm(new_afm)
-            ):
-                st.error(
-                    "Το νέο ελληνικό ΑΦΜ "
-                    "δεν είναι μαθηματικά έγκυρο."
-                )
-
-            else:
-                old_afm = selected["ΑΦΜ"]
-
-                for field in changed_fields:
-                    add_history(
-                        selected_id,
-                        old_afm,
-                        field,
-                        selected[field],
-                        changes[field],
-                        reason
-                    )
-
-                    selected[field] = changes[field]
-
-                st.success("Οι αλλαγές αποθηκεύτηκαν στη δοκιμαστική συνεδρία!")
-                if new_afm_correction:
-                    st.info(f"ΑΦΜ: {raw_new_afm} → {new_afm}. {new_afm_correction}.")
-
-                st.rerun()
-
-    # --------------------------------------------------------
-    # ΚΑΡΤΕΛΑ 4 — ΙΣΤΟΡΙΚΟ
-    # --------------------------------------------------------
+        if not suppliers:
+            st.info("Δεν υπάρχουν προμηθευτές.")
+        else:
+            selected_id = st.selectbox("Επίλεξε προμηθευτή", [s["id"] for s in suppliers],
+                                       format_func=lambda sid: next(
+                                           f'{s["afm"]} | {s["name"]}' for s in suppliers if s["id"] == sid))
+            selected = next(s for s in suppliers if s["id"] == selected_id)
+            with st.form(f"edit_supplier_postgres_{selected_id}"):
+                new_afm = st.text_input("ΑΦΜ / VAT ID", value=selected["afm"])
+                new_name = st.text_input("Επωνυμία προμηθευτή", value=selected["name"])
+                reason = st.text_area("Αιτιολογία αλλαγής (υποχρεωτική)")
+                submitted = st.form_submit_button("💾 Αποθήκευση αλλαγών")
+            if submitted:
+                afm = supplier_key(new_afm)
+                name = new_name.strip()
+                if not afm or not name or not reason.strip():
+                    st.error("Συμπλήρωσε ΑΦΜ, επωνυμία και αιτιολογία.")
+                elif not supplier_identifier_valid(afm):
+                    st.error("Το ΑΦΜ δεν περνά τον έλεγχο μορφής/ελληνικού ψηφίου ελέγχου.")
+                elif any(s["id"] != selected_id and supplier_key(s["afm"]) == afm for s in suppliers):
+                    st.error("Το ΑΦΜ ανήκει ήδη σε άλλον προμηθευτή.")
+                else:
+                    try:
+                        changed = edit_supplier_db(selected_id, afm, name, reason.strip(), current_user["username"])
+                        if changed:
+                            st.success("Η διόρθωση καταγράφηκε στη βάση και στο ιστορικό.")
+                            st.rerun()
+                        else:
+                            st.info("Δεν υπάρχουν αλλαγές.")
+                    except UniqueViolation:
+                        st.error("Το ΑΦΜ υπάρχει ήδη στη βάση.")
+                    except ForeignKeyViolation:
+                        st.error("Η αλλαγή ΑΦΜ δεν επιτρέπεται λόγω συνδεδεμένων εγγραφών. Απαιτείται έλεγχος.")
+                    except Exception:
+                        st.error("Η διόρθωση απέτυχε. Δεν έγινε μερική αποθήκευση.")
 
     with tab4:
         st.subheader("🕘 Ιστορικό Αλλαγών")
-
-        history = st.session_state.supplier_history
-
         if history:
-            st.dataframe(
-                pd.DataFrame(history),
-                use_container_width=True,
-                hide_index=True
-            )
+            st.dataframe(pd.DataFrame(history), use_container_width=True, hide_index=True)
         else:
-            st.info(
-                "Δεν υπάρχουν ακόμη αλλαγές."
-            )
-
-    # --------------------------------------------------------
-    # ΚΑΡΤΕΛΑ 5 — ΕΛΕΓΧΟΣ ΑΦΜ
-    # --------------------------------------------------------
+            st.info("Δεν υπάρχουν ακόμη καταγεγραμμένες αλλαγές.")
 
     with tab5:
-        st.subheader("🔍 Έλεγχος Ελληνικού ΑΦΜ")
-
-        afm_check = st.text_input(
-            "ΑΦΜ για έλεγχο"
-        )
-
+        st.subheader("🔍 Έλεγχος ΑΦΜ")
+        value = st.text_input("ΑΦΜ / VAT ID για έλεγχο")
         if st.button("Έλεγχος εγκυρότητας"):
-            checked_afm, correction = normalize_afm(afm_check)
-            if valid_greek_afm(checked_afm):
-                st.success(f"Έγκυρο ψηφίο ελέγχου. Κανονικοποιημένο ΑΦΜ: {checked_afm}")
-                if correction:
-                    st.info(correction)
+            normalized = supplier_key(value)
+            if normalized != value.strip().upper():
+                st.info(f"Κανονικοποίηση: {value} → {normalized}")
+            if supplier_identifier_valid(normalized):
+                st.success("Αποδεκτή μορφή. Για ελληνικό ΑΦΜ ελέγχθηκε και το ψηφίο ελέγχου.")
             else:
-                st.error(
-                    "Το ΑΦΜ δεν περνά "
-                    "τον μαθηματικό έλεγχο."
-                )
-
-        st.caption("Επιτρέπεται προσθήκη αρχικού 0 σε 8 ψηφία και διόρθωση O/Ο μόνο στην πρώτη θέση. Δεν πραγματοποιείται διασταύρωση με την ΑΑΔΕ ή το VIES.")
+                st.error("Μη αποδεκτό αναγνωριστικό.")
+            if any(supplier_key(s["afm"]) == normalized for s in suppliers):
+                st.warning("Το αναγνωριστικό υπάρχει ήδη στο μητρώο.")
+        st.caption("Δεν γίνεται διασταύρωση με ΑΑΔΕ/VIES. Τα ξένα VAT ID ελέγχονται μόνο ως προς τη μορφή.")
 
 
 # ============================================================
 # ΜΗΤΡΩΟ ΚΑΤΗΓΟΡΙΩΝ
 # ============================================================
-
-if "category_mappings" not in st.session_state:
-    st.session_state.category_mappings = {}
-
 
 elif page == "🗂️ Μητρώο Κατηγοριών":
     st.title("🗂️ Μητρώο Κατηγοριών")
@@ -959,9 +767,17 @@ elif page == "📥 Εισαγωγή Excel":
     if st.button("Έλεγχος δοκιμαστικού DRAFT", type="primary"):
         checked, report = validate_draft(demo, kind, st.session_state.category_mappings)
         st.metric("Εγγραφές", len(checked))
-        if report.empty:
-            st.success("Δεν βρέθηκαν προβλήματα.")
-        else:
+        try:
+            missing_suppliers = unknown_draft_suppliers(checked)
+        except Exception:
+            st.error("Δεν έγινε έλεγχος μητρώου λόγω σφάλματος σύνδεσης. Η εισαγωγή μπλοκάρεται.")
+            st.stop()
+        if missing_suppliers:
+            st.error(f"Εντοπίστηκαν {len(missing_suppliers)} άγνωστοι προμηθευτές. Η εισαγωγή μπλοκάρεται.")
+            st.dataframe(pd.DataFrame(missing_suppliers), hide_index=True, use_container_width=True)
+        if report.empty and not missing_suppliers:
+            st.success("Οι έλεγχοι πέρασαν. Η αποθήκευση αρχείων δεν έχει ενεργοποιηθεί.")
+        elif not report.empty:
             st.error(f"Βρέθηκαν {len(report)} παρατηρήσεις. Δεν εγκρίνεται εισαγωγή.")
             st.dataframe(report, hide_index=True, use_container_width=True)
             st.download_button("Λήψη αναφοράς ελέγχου CSV", report.to_csv(index=False).encode("utf-8-sig"), "elegxos_draft.csv", "text/csv")
@@ -1020,7 +836,7 @@ elif page == "⚙️ Ρυθμίσεις":
 
     st.write("Εφαρμογή: Market Price Analytics")
     st.write("Τεχνολογία: Python / Streamlit")
-    st.write("Έκδοση: Demo — Analytics & Supplier Registry v3")
+    st.write("Έκδοση: Demo Analytics · PostgreSQL Supplier Registry")
 
     st.warning(
         "Η εφαρμογή είναι δημόσια δοκιμαστική. "
