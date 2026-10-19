@@ -1,19 +1,37 @@
-"""Server-side PostgreSQL connectivity for synthetic-data development only."""
+
 import streamlit as st
-import psycopg
+from db import connect, check_schema
 
+st.title("🔌 Έλεγχος Supabase")
+st.info("Έλεγχος σύνδεσης μόνο για δοκιμαστικά δεδομένα.")
 
-def connect():
-    """Never print, log, or expose the connection URL."""
-    url = st.secrets.get('MPA_DATABASE_URL')
-    if not url:
-        raise RuntimeError('Δεν έχει οριστεί MPA_DATABASE_URL στα Streamlit Secrets.')
-    return psycopg.connect(url, connect_timeout=10, sslmode='require')
+if st.button("Έλεγχος σύνδεσης"):
+    try:
+        with connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT current_database(), current_user, NOW()"
+                )
+                database, username, server_time = cur.fetchone()
 
+        st.success("✅ Επιτυχής σύνδεση με Supabase!")
+        st.write("Βάση δεδομένων:", database)
+        st.write("Χρήστης PostgreSQL:", username)
+        st.write("Ώρα server:", str(server_time))
 
-def check_schema():
-    """Read-only smoke test. Does not migrate or modify any data."""
-    with connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = %s AND table_type = 'BASE TABLE' ORDER BY table_name", ('mpa',))
-            return [row[0] for row in cur.fetchall()]
+        tables = check_schema()
+        st.subheader("Πίνακες σχήματος mpa")
+        if tables:
+            st.dataframe(
+                [{"Πίνακας": name} for name in tables],
+                hide_index=True
+            )
+        else:
+            st.warning("Δεν βρέθηκαν πίνακες στο σχήμα mpa.")
+
+    except Exception:
+        st.error("❌ Αποτυχία σύνδεσης ή ελέγχου σχήματος.")
+        st.info(
+            "Έλεγξε το MPA_DATABASE_URL και τα Logs. "
+            "Μην κοινοποιήσεις κωδικούς σύνδεσης."
+        )
