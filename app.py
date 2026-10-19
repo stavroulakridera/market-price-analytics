@@ -215,16 +215,14 @@ if "suppliers" not in st.session_state:
             "ΑΦΜ": "000000000",
             "ΟΝΟΜΑΣΙΑ ΟΠΩΣ ΗΡΘΕ": "ΔΟΚΙΜΑΣΤΙΚΟΣ Α",
             "ΠΡΟΜΗΘΕΥΤΗΣ": "ΔΟΚΙΜΑΣΤΙΚΟΣ ΠΡΟΜΗΘΕΥΤΗΣ Α",
-            "ΧΩΡΑ": "Ελλάδα",
-            "ΚΑΤΑΣΤΑΣΗ": "Προς έλεγχο"
+            "ΧΩΡΑ": "Ελλάδα"
         },
         {
             "ID": 2,
             "ΑΦΜ": "123456789",
             "ΟΝΟΜΑΣΙΑ ΟΠΩΣ ΗΡΘΕ": "ΔΟΚΙΜΑΣΤΙΚΟΣ Β",
             "ΠΡΟΜΗΘΕΥΤΗΣ": "ΔΟΚΙΜΑΣΤΙΚΟΣ ΠΡΟΜΗΘΕΥΤΗΣ Β",
-            "ΧΩΡΑ": "Ελλάδα",
-            "ΚΑΤΑΣΤΑΣΗ": "Προς έλεγχο"
+            "ΧΩΡΑ": "Ελλάδα"
         }
     ]
 
@@ -232,7 +230,7 @@ if "suppliers" not in st.session_state:
 for supplier in st.session_state.suppliers:
     supplier.setdefault("ΟΝΟΜΑΣΙΑ ΟΠΩΣ ΗΡΘΕ", supplier.get("ΠΡΟΜΗΘΕΥΤΗΣ", ""))
     supplier.setdefault("ΧΩΡΑ", "Ελλάδα")
-    supplier.setdefault("ΚΑΤΑΣΤΑΣΗ", "Προς έλεγχο")
+    supplier.pop("ΚΑΤΑΣΤΑΣΗ", None)  # Παλιές συνεδρίες χωρίς πεδίο κατάστασης
 
 if "supplier_history" not in st.session_state:
     st.session_state.supplier_history = []
@@ -519,27 +517,9 @@ elif page == "🏢 Μητρώο Προμηθευτών":
 
     suppliers = st.session_state.suppliers
 
-    c1, c2, c3, c4 = st.columns(4)
-
-    c1.metric("Σύνολο", len(suppliers))
-    c2.metric(
-        "Ενεργοί",
-        sum(
-            s["ΚΑΤΑΣΤΑΣΗ"] == "Ενεργός"
-            for s in suppliers
-        )
-    )
-    c3.metric(
-        "Προς έλεγχο",
-        sum(
-            s["ΚΑΤΑΣΤΑΣΗ"] == "Προς έλεγχο"
-            for s in suppliers
-        )
-    )
-    c4.metric(
-        "Αλλαγές",
-        len(st.session_state.supplier_history)
-    )
+    c1, c2 = st.columns(2)
+    c1.metric("Σύνολο Προμηθευτών", len(suppliers))
+    c2.metric("Αλλαγές", len(st.session_state.supplier_history))
 
     st.divider()
 
@@ -562,16 +542,6 @@ elif page == "🏢 Μητρώο Προμηθευτών":
             "🔍 Αναζήτηση ΑΦΜ ή επωνυμίας"
         )
 
-        status_filter = st.selectbox(
-            "Κατάσταση",
-            [
-                "Όλοι",
-                "Ενεργός",
-                "Προς έλεγχο",
-                "Ανενεργός"
-            ]
-        )
-
         filtered = []
 
         for s in suppliers:
@@ -581,13 +551,7 @@ elif page == "🏢 Μητρώο Προμηθευτών":
                 s["ΠΡΟΜΗΘΕΥΤΗΣ"]
             ]).lower()
 
-            if (
-                search.lower() in searchable
-                and (
-                    status_filter == "Όλοι"
-                    or s["ΚΑΤΑΣΤΑΣΗ"] == status_filter
-                )
-            ):
+            if search.lower() in searchable:
                 filtered.append(s)
 
         columns = [
@@ -595,8 +559,7 @@ elif page == "🏢 Μητρώο Προμηθευτών":
             "ΑΦΜ",
             "ΟΝΟΜΑΣΙΑ ΟΠΩΣ ΗΡΘΕ",
             "ΠΡΟΜΗΘΕΥΤΗΣ",
-            "ΧΩΡΑ",
-            "ΚΑΤΑΣΤΑΣΗ"
+            "ΧΩΡΑ"
         ]
 
         st.dataframe(
@@ -650,15 +613,6 @@ elif page == "🏢 Μητρώο Προμηθευτών":
                 ["Ελλάδα", "Εξωτερικό"]
             )
 
-            status = st.selectbox(
-                "Κατάσταση",
-                [
-                    "Προς έλεγχο",
-                    "Ενεργός",
-                    "Ανενεργός"
-                ]
-            )
-
             submitted = st.form_submit_button(
                 "💾 Αποθήκευση",
                 type="primary"
@@ -682,9 +636,6 @@ elif page == "🏢 Μητρώο Προμηθευτών":
                 )
 
             else:
-                if country == "Εξωτερικό":
-                    status = "Προς έλεγχο"
-
                 supplier_id = next_supplier_id()
 
                 suppliers.append({
@@ -692,8 +643,7 @@ elif page == "🏢 Μητρώο Προμηθευτών":
                     "ΑΦΜ": afm,
                     "ΟΝΟΜΑΣΙΑ ΟΠΩΣ ΗΡΘΕ": original_name,
                     "ΠΡΟΜΗΘΕΥΤΗΣ": official_name,
-                    "ΧΩΡΑ": country,
-                    "ΚΑΤΑΣΤΑΣΗ": status
+                    "ΧΩΡΑ": country
                 })
 
                 add_history(
@@ -767,20 +717,6 @@ elif page == "🏢 Μητρώο Προμηθευτών":
                 )
             )
 
-            statuses = [
-                "Προς έλεγχο",
-                "Ενεργός",
-                "Ανενεργός"
-            ]
-
-            new_status = st.selectbox(
-                "Κατάσταση",
-                statuses,
-                index=statuses.index(
-                    selected["ΚΑΤΑΣΤΑΣΗ"]
-                )
-            )
-
             reason = st.text_area(
                 "Αιτιολογία αλλαγής",
                 placeholder=(
@@ -801,8 +737,7 @@ elif page == "🏢 Μητρώο Προμηθευτών":
             changes = {
                 "ΑΦΜ": new_afm,
                 "ΠΡΟΜΗΘΕΥΤΗΣ": new_name,
-                "ΧΩΡΑ": new_country,
-                "ΚΑΤΑΣΤΑΣΗ": new_status
+                "ΧΩΡΑ": new_country
             }
 
             changed_fields = [
@@ -844,15 +779,6 @@ elif page == "🏢 Μητρώο Προμηθευτών":
                 st.error(
                     "Το νέο ελληνικό ΑΦΜ "
                     "δεν είναι μαθηματικά έγκυρο."
-                )
-
-            elif (
-                new_country == "Εξωτερικό"
-                and new_status == "Ενεργός"
-            ):
-                st.error(
-                    "Τα ξένα VAT IDs παραμένουν "
-                    "προς έλεγχο στη δοκιμαστική έκδοση."
                 )
 
             else:
