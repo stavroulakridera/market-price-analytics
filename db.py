@@ -1,37 +1,38 @@
 
+"""PostgreSQL connection for Market Price Analytics."""
+
 import streamlit as st
-from db import connect, check_schema
+import psycopg
 
-st.title("🔌 Έλεγχος Supabase")
-st.info("Έλεγχος σύνδεσης μόνο για δοκιμαστικά δεδομένα.")
 
-if st.button("Έλεγχος σύνδεσης"):
-    try:
-        with connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT current_database(), current_user, NOW()"
-                )
-                database, username, server_time = cur.fetchone()
+def connect():
+    """Connect securely to Supabase PostgreSQL."""
+    url = st.secrets.get("MPA_DATABASE_URL")
 
-        st.success("✅ Επιτυχής σύνδεση με Supabase!")
-        st.write("Βάση δεδομένων:", database)
-        st.write("Χρήστης PostgreSQL:", username)
-        st.write("Ώρα server:", str(server_time))
-
-        tables = check_schema()
-        st.subheader("Πίνακες σχήματος mpa")
-        if tables:
-            st.dataframe(
-                [{"Πίνακας": name} for name in tables],
-                hide_index=True
-            )
-        else:
-            st.warning("Δεν βρέθηκαν πίνακες στο σχήμα mpa.")
-
-    except Exception:
-        st.error("❌ Αποτυχία σύνδεσης ή ελέγχου σχήματος.")
-        st.info(
-            "Έλεγξε το MPA_DATABASE_URL και τα Logs. "
-            "Μην κοινοποιήσεις κωδικούς σύνδεσης."
+    if not url:
+        raise RuntimeError(
+            "Δεν έχει οριστεί το MPA_DATABASE_URL στα Streamlit Secrets."
         )
+
+    return psycopg.connect(
+        url,
+        connect_timeout=10,
+        sslmode="require"
+    )
+
+
+def check_schema():
+    """Return the tables in the mpa schema."""
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema = %s
+                  AND table_type = 'BASE TABLE'
+                ORDER BY table_name
+                """,
+                ("mpa",)
+            )
+            return [row[0] for row in cur.fetchall()]
