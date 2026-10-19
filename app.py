@@ -34,6 +34,35 @@ def normalize_category(value):
 
 CATEGORY_LOOKUP = {normalize_category(item): item for item in PRODUCT_CATEGORIES}
 
+# Επίσημες αλυσίδες σούπερ μάρκετ, όπως δόθηκαν από τον χρήστη.
+SUPERMARKET_CHAINS = [
+    "BAZAAR", "DISCOUNT MARKT", "LIDL", "MARKET IN", "METRO AEBE",
+    "ΑΒ ΒΑΣΙΛΟΠΟΥΛΟΣ", "ΑΝΕΔΗΚ ΚΡΗΤΙΚΟΣ", "ΓΑΛΑΞΙΑΣ",
+    "ΜΑΣΟΥΤΗΣ", "ΣΚΛΑΒΕΝΙΤΗΣ", "ΣΥΝΚΑ", "ΧΑΛΚΙΑΔΑΚΗΣ",
+]
+
+def normalize_chain(value):
+    return " ".join(str(value).split()).upper()
+
+CHAIN_LOOKUP = {normalize_chain(item): item for item in SUPERMARKET_CHAINS}
+
+# Αντιστοιχίσεις DEMO: παραμένουν μόνο στη συνεδρία, όχι στο SharePoint.
+# Κλειδί: (αλυσίδα, ονομασία κατηγορίας που δηλώνει η αλυσίδα).
+# Η επίσημη κατηγορία είναι πάντοτε μία από τις PRODUCT_CATEGORIES.
+def mapping_key(chain, raw_category):
+    return (normalize_chain(chain), normalize_category(raw_category))
+
+
+def resolve_product_category(chain, raw_category, mappings):
+    key = mapping_key(chain, raw_category)
+    if key in mappings:
+        return mappings[key]
+    official = CATEGORY_LOOKUP.get(normalize_category(raw_category))
+    if official:
+        return {"Κατηγορία": official, "Υποκατηγορία": ""}
+    return None
+
+
 def clean_identifier(value):
     if pd.isna(value):
         return ""
@@ -41,7 +70,8 @@ def clean_identifier(value):
     return text[:-2] if re.fullmatch(r"\d+\.0", text) else text
 
 
-def validate_draft(frame, kind):
+def validate_draft(frame, kind, category_mappings=None):
+    category_mappings = category_mappings or {}
     headers = DRAFT_HEADERS[kind]
     missing = [h for h in headers if h not in frame.columns]
     if missing:
@@ -57,8 +87,12 @@ def validate_draft(frame, kind):
         for col in ["ΠΡΟΜΗΘΕΥΤΗΣ", "ΣΟΥΠΕΡ ΜΑΡΚΕΤ", "ΚΑΤΗΓΟΡΙΑ", "ΠΡΟΪΟΝ"]:
             if pd.isna(row[col]) or not str(row[col]).strip():
                 issues.append((excel_row, col, "Υποχρεωτικό πεδίο"))
-        if pd.notna(row["ΚΑΤΗΓΟΡΙΑ"]) and str(row["ΚΑΤΗΓΟΡΙΑ"]).strip() and normalize_category(row["ΚΑΤΗΓΟΡΙΑ"]) not in CATEGORY_LOOKUP:
-            issues.append((excel_row, "ΚΑΤΗΓΟΡΙΑ", "Δεν υπάρχει στον επίσημο κατάλογο κατηγοριών"))
+        if pd.notna(row["ΚΑΤΗΓΟΡΙΑ"]) and str(row["ΚΑΤΗΓΟΡΙΑ"]).strip():
+            matched = resolve_product_category(row["ΣΟΥΠΕΡ ΜΑΡΚΕΤ"], row["ΚΑΤΗΓΟΡΙΑ"], category_mappings)
+            if matched is None:
+                issues.append((excel_row, "ΚΑΤΗΓΟΡΙΑ", "Δεν βρέθηκε αντιστοίχιση — προσθέστε την στο Μητρώο Κατηγοριών"))
+        if pd.notna(row["ΣΟΥΠΕΡ ΜΑΡΚΕΤ"]) and str(row["ΣΟΥΠΕΡ ΜΑΡΚΕΤ"]).strip() and normalize_chain(row["ΣΟΥΠΕΡ ΜΑΡΚΕΤ"]) not in CHAIN_LOOKUP:
+            issues.append((excel_row, "ΣΟΥΠΕΡ ΜΑΡΚΕΤ", "Δεν υπάρχει στον επίσημο κατάλογο αλυσίδων"))
         old = pd.to_numeric(row[old_col], errors="coerce")
         new = pd.to_numeric(row[new_col], errors="coerce")
         if pd.isna(old) or pd.isna(new) or old <= 0 or new <= 0:
@@ -80,7 +114,7 @@ def synthetic_draft(kind):
     cols = DRAFT_HEADERS[kind]
     old, new = (1.20, 1.30) if kind == "Ανατιμήσεις" else (1.30, 1.20)
     return pd.DataFrame([
-        ["", "DEMO ΠΡΟΜΗΘΕΥΤΗΣ", "DEMO ΑΛΥΣΙΔΑ", "ΑΛΕΥΡΙ", "DEMO ΠΡΟΪΟΝ", "0000000000000",
+        ["", "DEMO ΠΡΟΜΗΘΕΥΤΗΣ", "BAZAAR", "ΑΛΕΥΡΙ", "DEMO ΠΡΟΪΟΝ", "0000000000000",
          1.10, old, new, "2026-10-01", "2026-10-05"]
     ], columns=cols)
 
@@ -213,7 +247,7 @@ if "supplier_history" not in st.session_state:
 def demo_prices():
     products = ["Γάλα", "Γιαούρτι", "Τυρί", "Ρύζι", "Ζυμαρικά", "Ελαιόλαδο", "Καφές", "Αλεύρι", "Χυμός", "Απορρυπαντικό"]
     categories = ["ΓΑΛΑ ΦΡΕΣΚΟ ΠΛΗΡΕΣ ΚΑΙ ΜΕ ΧΑΜΗΛΑ ΛΙΠΑΡΑ", "ΓΙΑΟΥΡΤΙ ΚΑΙ ΕΠΙΔΟΡΠΙΑ ΓΙΑΟΥΡΤΙΟΥ", "ΤΥΡΙ", "ΑΛΕΥΡΙ", "ΖΥΜΑΡΙΚΑ", "ΕΛΑΙΟΛΑΔΟ", "ΚΑΦΕΣ ΣΥΣΚΕΥΑΣΜΕΝΟΣ", "ΡΥΖΙ", "ΧΥΜΟΙ", "ΑΠΟΡΡΥΠΑΝΤΙΚΑ ΠΑΝΤΟΣ ΕΙΔΟΥΣ"]
-    chains = ["Αλυσίδα Α", "Αλυσίδα Β", "Αλυσίδα Γ"]
+    chains = ["BAZAAR", "LIDL", "ΣΚΛΑΒΕΝΙΤΗΣ"]
     rows = []
     for i in range(120):
         old = round(1.25 + (i % 17) * 0.43, 2)
@@ -420,6 +454,7 @@ with st.sidebar:
             "📉 Υποτιμήσεις",
             "🏢 Μητρώο Προμηθευτών",
             "🗂️ Μητρώο Κατηγοριών",
+            "🏬 Αλυσίδες Σούπερ Μάρκετ",
             "📥 Εισαγωγή Excel",
             "📊 Στατιστικά & Αναφορές",
             "🕘 Ιστορικό Εισαγωγών",
@@ -895,6 +930,10 @@ elif page == "🏢 Μητρώο Προμηθευτών":
 # ΜΗΤΡΩΟ ΚΑΤΗΓΟΡΙΩΝ
 # ============================================================
 
+if "category_mappings" not in st.session_state:
+    st.session_state.category_mappings = {}
+
+
 elif page == "🗂️ Μητρώο Κατηγοριών":
     st.title("🗂️ Μητρώο Κατηγοριών")
     st.caption("Επίσημος κατάλογος κατηγοριών για τον έλεγχο των DRAFT Excel.")
@@ -902,7 +941,50 @@ elif page == "🗂️ Μητρώο Κατηγοριών":
     category_search = st.text_input("Αναζήτηση κατηγορίας", placeholder="Πληκτρολογήστε όνομα κατηγορίας")
     shown_categories = [item for item in PRODUCT_CATEGORIES if normalize_category(category_search) in normalize_category(item)]
     st.dataframe(pd.DataFrame({"Κατηγορία προϊόντος": shown_categories}), hide_index=True, use_container_width=True)
-    st.caption("Οι κατηγορίες είναι σταθερές στη δημόσια demo. Δεν γίνεται εγγραφή στο SharePoint.")
+    st.divider()
+    st.subheader("Υποκατηγορίες και αντιστοιχίσεις αλυσίδων")
+    st.caption("Κάθε αλυσίδα μπορεί να έχει διαφορετική ονομασία. Η αντιστοίχιση εγκρίνεται από εμάς και συνδέεται με μία επίσημη κατηγορία.")
+    with st.form("new_category_mapping", clear_on_submit=True):
+        chain = st.selectbox("Αλυσίδα σούπερ μάρκετ", SUPERMARKET_CHAINS)
+        raw_name = st.text_input("Κατηγορία όπως τη δηλώνει το σούπερ μάρκετ", placeholder="π.χ. INSTANT COFFEE")
+        official = st.selectbox("Επίσημη κατηγορία", PRODUCT_CATEGORIES, index=PRODUCT_CATEGORIES.index("ΚΑΦΕΣ ΣΥΣΚΕΥΑΣΜΕΝΟΣ"))
+        subcategory = st.text_input("Υποκατηγορία", placeholder="π.χ. Στιγμιαίος καφές")
+        submitted = st.form_submit_button("Προσθήκη αντιστοίχισης", type="primary")
+    if submitted:
+        if not raw_name.strip() or not subcategory.strip():
+            st.error("Συμπλήρωσε την ονομασία της αλυσίδας και την υποκατηγορία.")
+        elif mapping_key(chain, raw_name) in st.session_state.category_mappings:
+            st.error("Η αντιστοίχιση υπάρχει ήδη για αυτή την αλυσίδα. Δεν αντικαταστάθηκε.")
+        else:
+            st.session_state.category_mappings[mapping_key(chain, raw_name)] = {
+                "Κατηγορία": official,
+                "Υποκατηγορία": " ".join(subcategory.split()),
+            }
+            st.success("Η αντιστοίχιση προστέθηκε στη δοκιμαστική συνεδρία.")
+    mappings_rows = [
+        {"Αλυσίδα": chain_name, "Κατηγορία αλυσίδας": raw,
+         "Επίσημη κατηγορία": target["Κατηγορία"], "Υποκατηγορία": target["Υποκατηγορία"]}
+        for (chain_name, raw), target in st.session_state.category_mappings.items()
+    ]
+    if mappings_rows:
+        st.dataframe(pd.DataFrame(mappings_rows), hide_index=True, use_container_width=True)
+    else:
+        st.info("Δεν έχουν προστεθεί ακόμη αντιστοιχίσεις στη δοκιμαστική συνεδρία.")
+    st.caption("DEMO: Οι αλλαγές χάνονται όταν λήξει η συνεδρία. Δεν αποθηκεύονται στο SharePoint.")
+
+
+# ============================================================
+# ΜΗΤΡΩΟ ΑΛΥΣΙΔΩΝ ΣΟΥΠΕΡ ΜΑΡΚΕΤ
+# ============================================================
+
+elif page == "🏬 Αλυσίδες Σούπερ Μάρκετ":
+    st.title("🏬 Αλυσίδες Σούπερ Μάρκετ")
+    st.caption("Επίσημος κατάλογος αλυσίδων για τον έλεγχο των DRAFT Excel.")
+    st.metric("Σύνολο αλυσίδων", len(SUPERMARKET_CHAINS))
+    chain_search = st.text_input("Αναζήτηση αλυσίδας", placeholder="Πληκτρολογήστε επωνυμία αλυσίδας")
+    shown_chains = [item for item in SUPERMARKET_CHAINS if normalize_chain(chain_search) in normalize_chain(item)]
+    st.dataframe(pd.DataFrame({"Αλυσίδα σούπερ μάρκετ": shown_chains}), hide_index=True, use_container_width=True)
+    st.caption("Οι αλυσίδες είναι σταθερές στη δημόσια demo. Δεν γίνεται εγγραφή στο SharePoint.")
 
 
 # ============================================================
@@ -921,7 +1003,7 @@ elif page == "📥 Εισαγωγή Excel":
     demo = synthetic_draft(kind)
     st.dataframe(demo, hide_index=True, use_container_width=True)
     if st.button("Έλεγχος δοκιμαστικού DRAFT", type="primary"):
-        checked, report = validate_draft(demo, kind)
+        checked, report = validate_draft(demo, kind, st.session_state.category_mappings)
         st.metric("Εγγραφές", len(checked))
         if report.empty:
             st.success("Δεν βρέθηκαν προβλήματα.")
