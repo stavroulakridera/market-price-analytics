@@ -2,6 +2,77 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timezone
+from io import BytesIO
+import re
+
+# ============================================================
+# ΕΛΕΓΧΟΣ DRAFT (μόνο συνθετικά δεδομένα στη δημόσια DEMO)
+# ============================================================
+DRAFT_HEADERS = {
+    "Ανατιμήσεις": [
+        "ΑΦΜ", "ΠΡΟΜΗΘΕΥΤΗΣ", "ΣΟΥΠΕΡ ΜΑΡΚΕΤ", "ΚΑΤΗΓΟΡΙΑ", "ΠΡΟΪΟΝ", "BARCODE",
+        "Τιμή αγοράς χονδρικής πριν την 19-09-2023",
+        "Τιμή αγοράς χονδρικής πριν την τελευταία ανατίμηση",
+        "Τιμή αγοράς χονδρικής μετά την τελευταία ανατίμηση",
+        "Ημερομηνία ανακοίνωσης της τελευταίας ανατίμησης από τον προμηθευτή",
+        "Ημερομηνία εφαρμογής της τελευταίας ανατίμησης από τον προμηθευτή",
+    ],
+    "Υποτιμήσεις": [
+        "ΑΦΜ", "ΠΡΟΜΗΘΕΥΤΗΣ", "ΣΟΥΠΕΡ ΜΑΡΚΕΤ", "ΚΑΤΗΓΟΡΙΑ", "ΠΡΟΪΟΝ", "BARCODE",
+        "Τιμή αγοράς χονδρικής πριν την 19-09-2023", "ΠΑΛΙΑ ΤΙΜΗ", "ΝΕΑ ΤΙΜΗ",
+        "Ημερομηνία παλιάς τιμής έως και", "Ημερομηνία εφαρμογής της νέας τιμής",
+    ],
+}
+
+
+def clean_identifier(value):
+    if pd.isna(value):
+        return ""
+    text = str(value).strip()
+    return text[:-2] if re.fullmatch(r"\d+\.0", text) else text
+
+
+def validate_draft(frame, kind):
+    headers = DRAFT_HEADERS[kind]
+    missing = [h for h in headers if h not in frame.columns]
+    if missing:
+        return None, ["Λείπουν στήλες: " + ", ".join(missing)]
+    df = frame.loc[:, headers].copy().dropna(how="all")
+    issues = []
+    old_col, new_col = (headers[7], headers[8])
+    for index, row in df.iterrows():
+        excel_row = index + 2
+        afm = clean_identifier(row["ΑΦΜ"])
+        if not valid_greek_afm(afm):
+            issues.append((excel_row, "ΑΦΜ", "Μη έγκυρο ή κενό ΑΦΜ"))
+        for col in ["ΠΡΟΜΗΘΕΥΤΗΣ", "ΣΟΥΠΕΡ ΜΑΡΚΕΤ", "ΚΑΤΗΓΟΡΙΑ", "ΠΡΟΪΟΝ"]:
+            if pd.isna(row[col]) or not str(row[col]).strip():
+                issues.append((excel_row, col, "Υποχρεωτικό πεδίο"))
+        old = pd.to_numeric(row[old_col], errors="coerce")
+        new = pd.to_numeric(row[new_col], errors="coerce")
+        if pd.isna(old) or pd.isna(new) or old <= 0 or new <= 0:
+            issues.append((excel_row, "ΤΙΜΕΣ", "Απαιτούνται θετικές αριθμητικές τιμές"))
+        elif (kind == "Ανατιμήσεις" and new <= old) or (kind == "Υποτιμήσεις" and new >= old):
+            issues.append((excel_row, "ΤΙΜΕΣ", "Η κατεύθυνση της μεταβολής δεν συμφωνεί με το DRAFT"))
+        for col in headers[9:11]:
+            if pd.isna(pd.to_datetime(row[col], errors="coerce", dayfirst=True)):
+                issues.append((excel_row, col, "Μη έγκυρη ή κενή ημερομηνία"))
+    key_cols = ["ΑΦΜ", "ΣΟΥΠΕΡ ΜΑΡΚΕΤ", "ΠΡΟΪΟΝ", "BARCODE", headers[10]]
+    duplicate = df.assign(ΑΦΜ=df["ΑΦΜ"].map(clean_identifier)).duplicated(subset=key_cols, keep=False)
+    for index in df.index[duplicate]:
+        issues.append((index + 2, "ΔΙΠΛΟΤΥΠΟ", "Πιθανή διπλή εγγραφή μέσα στο DRAFT"))
+    report = pd.DataFrame(issues, columns=["Γραμμή Excel", "Πεδίο", "Παρατήρηση"])
+    return df, report
+
+
+def synthetic_draft(kind):
+    cols = DRAFT_HEADERS[kind]
+    old, new = (1.20, 1.30) if kind == "Ανατιμήσεις" else (1.30, 1.20)
+    return pd.DataFrame([
+        ["", "DEMO ΠΡΟΜΗΘΕΥΤΗΣ", "DEMO ΑΛΥΣΙΔΑ", "DEMO ΚΑΤΗΓΟΡΙΑ", "DEMO ΠΡΟΪΟΝ", "0000000000000",
+         1.10, old, new, "2026-10-01", "2026-10-05"]
+    ], columns=cols)
+
 
 # ============================================================
 # ΡΥΘΜΙΣΕΙΣ ΕΦΑΡΜΟΓΗΣ
@@ -150,52 +221,154 @@ def demo_prices():
     return pd.DataFrame(rows)
 
 
+INCREASE_COLUMNS = [
+    "ΗΜΕΡΟΜΗΝΙΑ ΑΡΧΕΙΟΥ ΑΝΑΤΙΜΗΣΗΣ",
+    "ΑΦΜ",
+    "Ονομασία (όπως ήρθε)",
+    "ΠΡΟΜΗΘΕΥΤΗΣ",
+    "ΣΟΥΠΕΡ ΜΑΡΚΕΤ",
+    "ΚΑΤΗΓΟΡΙΑ",
+    "ΠΡΟΪΟΝ",
+    "BARCODE",
+    "Τιμή αγοράς χονδρικής πριν την 19-09-2023",
+    "Τιμή αγοράς χονδρικής πριν την τελευταία ανατίμηση",
+    "Τιμή αγοράς χονδρικής μετά την τελευταία ανατίμηση",
+    "Ημερομηνία ανακοίνωσης της τελευταίας ανατίμησης από τον προμηθευτή",
+    "Ημερομηνία εφαρμογής της τελευταίας ανατίμησης από τον προμηθευτή",
+    "ΑΝΑΤΙΜΗΣΗ ΣΕ €",
+    "ΠΟΣΟΣΤΙΑΙΑ ΑΝΑΤΙΜΗΣΗ(ΤΕΛΕΥΤΑΙΑ ΜΕ ΠΡΟ ΤΕΛΕΥΤΑΙΑ)",
+    "ΠΟΣΟΣΤΙΑΙΑ ΑΝΑΤΙΜΗΣΗ (ΤΕΛΕΥΤΑΙΑ ΣΕ ΣΧΕΣΗ ΜΕ 19/9)",
+]
+
+
+def increase_table_demo(data):
+    """16-column synthetic display; no real supplier or SharePoint data."""
+    rows = []
+    for i, (_, item) in enumerate(data.iterrows()):
+        previous = float(item["Προηγούμενη τιμή"])
+        latest = float(item["Νέα τιμή"])
+        baseline = round(previous * (0.95 + (i % 4) * 0.02), 2)
+        rows.append({
+            INCREASE_COLUMNS[0]: item["Ημερομηνία"].strftime("%d/%m/%Y"),
+            INCREASE_COLUMNS[1]: "DEMO",
+            INCREASE_COLUMNS[2]: item["Προμηθευτής"],
+            INCREASE_COLUMNS[3]: item["Προμηθευτής"],
+            INCREASE_COLUMNS[4]: item["Αλυσίδα"],
+            INCREASE_COLUMNS[5]: item["Κατηγορία"],
+            INCREASE_COLUMNS[6]: item["Προϊόν"],
+            INCREASE_COLUMNS[7]: f"DEMO-{i+1:06d}",
+            INCREASE_COLUMNS[8]: baseline,
+            INCREASE_COLUMNS[9]: previous,
+            INCREASE_COLUMNS[10]: latest,
+            INCREASE_COLUMNS[11]: item["Ημερομηνία"].strftime("%d/%m/%Y"),
+            INCREASE_COLUMNS[12]: item["Ημερομηνία"].strftime("%d/%m/%Y"),
+            INCREASE_COLUMNS[13]: round(latest - previous, 2),
+            INCREASE_COLUMNS[14]: round((latest / previous - 1) * 100, 2),
+            INCREASE_COLUMNS[15]: round((latest / baseline - 1) * 100, 2),
+        })
+    return pd.DataFrame(rows, columns=INCREASE_COLUMNS)
+
+
 def price_table(data, increase=True):
     if data.empty:
         st.info("Δεν υπάρχουν εγγραφές για τα επιλεγμένα φίλτρα.")
         return
     display = data.copy().sort_values("Ημερομηνία", ascending=False)
-    display["Ημερομηνία"] = display["Ημερομηνία"].dt.strftime("%d/%m/%Y")
-    def color_change(value):
-        if increase and value > 3:
-            return "background-color: #ffe1e1; color: #8f1515; font-weight: bold"
-        if not increase and value < 0:
-            return "background-color: #e0f5e7; color: #166534; font-weight: bold"
-        return ""
-    st.dataframe(display.style.map(color_change, subset=["Μεταβολή %"]),
-                 use_container_width=True, hide_index=True, height=410)
-    st.download_button("⬇️ Εξαγωγή φιλτραρισμένων δεδομένων CSV (DEMO)",
-                       display.to_csv(index=False).encode("utf-8-sig"),
-                       file_name="demo_prices.csv", mime="text/csv")
+    if increase:
+        display = increase_table_demo(display)
+        highlight_col = INCREASE_COLUMNS[14]
+        styled = display.style.map(
+            lambda v: "background-color: #ffe1e1; color: #8f1515; font-weight: bold"
+            if pd.notna(v) and v > 3 else "", subset=[highlight_col]
+        )
+        column_config = {
+            col: st.column_config.NumberColumn(format="%.2f €")
+            for col in [INCREASE_COLUMNS[8], INCREASE_COLUMNS[9], INCREASE_COLUMNS[10], INCREASE_COLUMNS[13]]
+        }
+        column_config.update({
+            col: st.column_config.NumberColumn(format="%.2f%%")
+            for col in [INCREASE_COLUMNS[14], INCREASE_COLUMNS[15]]
+        })
+    else:
+        display["Ημερομηνία"] = display["Ημερομηνία"].dt.strftime("%d/%m/%Y")
+        styled = display.style.map(
+            lambda v: "background-color: #e0f5e7; color: #166534; font-weight: bold" if v < 0 else "",
+            subset=["Μεταβολή %"],
+        )
+        column_config = {
+            "Προηγούμενη τιμή": st.column_config.NumberColumn(format="%.2f €"),
+            "Νέα τιμή": st.column_config.NumberColumn(format="%.2f €"),
+            "Μεταβολή %": st.column_config.NumberColumn(format="%.2f%%"),
+        }
+    st.dataframe(styled, use_container_width=True, hide_index=True, height=470,
+                 column_config=column_config)
+    st.download_button(
+        "⬇️ Εξαγωγή φιλτραρισμένου πίνακα CSV (DEMO)",
+        display.to_csv(index=False).encode("utf-8-sig"),
+        file_name="demo_anatimiseis.csv" if increase else "demo_ypotimiseis.csv",
+        mime="text/csv",
+    )
 
 
 def price_view(increase=True):
     df = demo_prices()
     df = df[df["Μεταβολή %"] > 0] if increase else df[df["Μεταβολή %"] < 0]
+    st.subheader("Φίλτρα πίνακα")
     a, b, c = st.columns(3)
     chain = a.selectbox("Αλυσίδα", ["Όλες"] + sorted(df["Αλυσίδα"].unique().tolist()), key=f"chain_{increase}")
     category = b.selectbox("Κατηγορία", ["Όλες"] + sorted(df["Κατηγορία"].unique().tolist()), key=f"category_{increase}")
-    search = c.text_input("Αναζήτηση προϊόντος / προμηθευτή", key=f"search_{increase}")
+    supplier = c.selectbox("Προμηθευτής", ["Όλοι"] + sorted(df["Προμηθευτής"].unique().tolist()), key=f"supplier_{increase}")
+    d, e = st.columns([2, 1])
+    search = d.text_input("🔍 Αναζήτηση προϊόντος ή προμηθευτή", key=f"search_{increase}")
+    date_range = e.date_input(
+        "Περίοδος", value=(df["Ημερομηνία"].min().date(), df["Ημερομηνία"].max().date()),
+        key=f"dates_{increase}",
+    )
     if chain != "Όλες":
         df = df[df["Αλυσίδα"] == chain]
     if category != "Όλες":
         df = df[df["Κατηγορία"] == category]
+    if supplier != "Όλοι":
+        df = df[df["Προμηθευτής"] == supplier]
     if search.strip():
-        df = df[df["Προϊόν"].str.contains(search, case=False, regex=False) |
-                df["Προμηθευτής"].str.contains(search, case=False, regex=False)]
-    x, y, z = st.columns(3)
+        df = df[df["Προϊόν"].str.contains(search.strip(), case=False, regex=False) |
+                df["Προμηθευτής"].str.contains(search.strip(), case=False, regex=False)]
+    if isinstance(date_range, (tuple, list)) and len(date_range) == 2:
+        start, end = date_range
+        df = df[df["Ημερομηνία"].dt.date.between(start, end)]
+
+    x, y, z, w = st.columns(4)
     x.metric("Εγγραφές", len(df))
     y.metric("Μέση μεταβολή", f"{df['Μεταβολή %'].mean():.2f}%" if len(df) else "—")
     z.metric("Μέγιστη ανατίμηση" if increase else "Μεγαλύτερη υποτίμηση",
              f"{(df['Μεταβολή %'].max() if increase else df['Μεταβολή %'].min()):.2f}%" if len(df) else "—")
+    w.metric("Ανατιμήσεις > 3%" if increase else "Εγγραφές μείωσης",
+             int((df["Μεταβολή %"] > 3).sum()) if increase else len(df))
+
     st.subheader("Αναλυτικός πίνακας")
     if increase:
-        st.caption("Κόκκινη επισήμανση μόνο όταν η μεταβολή είναι αυστηρά μεγαλύτερη από 3%.")
+        st.caption("Κόκκινο μόνο για μεταβολές αυστηρά > 3%. Κάνε κλικ σε μια κεφαλίδα για ταξινόμηση.")
+    else:
+        st.caption("Πράσινη επισήμανση υποτιμήσεων. Κάνε κλικ σε μια κεφαλίδα για ταξινόμηση.")
     price_table(df, increase)
-    if len(df):
-        st.subheader("Μεταβολές ανά κατηγορία")
-        chart = df.groupby("Κατηγορία")["Μεταβολή %"].mean().sort_values()
-        st.bar_chart(chart, horizontal=True)
+
+    st.subheader("Συγκεντρωτικός πίνακας ανά κατηγορία")
+    if not df.empty:
+        summary = df.groupby("Κατηγορία", as_index=False).agg(
+            Εγγραφές=("Προϊόν", "size"),
+            Μέση_μεταβολή=("Μεταβολή %", "mean"),
+            Ελάχιστη_μεταβολή=("Μεταβολή %", "min"),
+            Μέγιστη_μεταβολή=("Μεταβολή %", "max"),
+        ).rename(columns={
+            "Μέση_μεταβολή": "Μέση μεταβολή %",
+            "Ελάχιστη_μεταβολή": "Ελάχιστη μεταβολή %",
+            "Μέγιστη_μεταβολή": "Μέγιστη μεταβολή %",
+        })
+        for col in ["Μέση μεταβολή %", "Ελάχιστη μεταβολή %", "Μέγιστη μεταβολή %"]:
+            summary[col] = summary[col].round(2)
+        st.dataframe(summary, use_container_width=True, hide_index=True)
+    else:
+        st.info("Δεν υπάρχουν συγκεντρωτικά στοιχεία για τα επιλεγμένα φίλτρα.")
 
 # ============================================================
 # ΠΛΕΥΡΙΚΟ ΜΕΝΟΥ
@@ -255,7 +428,7 @@ if page == "🏠 Αρχική":
 
 elif page == "📈 Ανατιμήσεις":
     st.title("📈 Ανατιμήσεις")
-    st.caption("Συνθετικές εγγραφές επίδειξης — οι 16 στήλες του πραγματικού αρχείου θα προστεθούν μετά την ασφαλή αντιστοίχιση.")
+    st.caption("Δοκιμαστικός πίνακας με τις 16 στήλες του φύλλου 2026 — μόνο συνθετικά δεδομένα.")
     price_view(True)
 
 elif page == "📉 Υποτιμήσεις":
@@ -704,10 +877,25 @@ elif page == "🗂️ Μητρώο Κατηγοριών":
 
 elif page == "📥 Εισαγωγή Excel":
     st.title("📥 Εισαγωγή Excel")
-    st.info(
-        "Η εισαγωγή πραγματικών υπηρεσιακών Excel είναι απενεργοποιημένη στη δημόσια DEMO. "
-        "Θα υλοποιηθεί μόνο σε εγκεκριμένο, προστατευμένο περιβάλλον."
-    )
+    st.warning("ΔΗΜΟΣΙΑ DEMO: Μην ανεβάζετε πραγματικά υπηρεσιακά αρχεία, ΑΦΜ ή στοιχεία προμηθευτών. Δεν πραγματοποιείται αποθήκευση στο SharePoint.")
+    kind = st.radio("Τύπος DRAFT", ["Ανατιμήσεις", "Υποτιμήσεις"], horizontal=True)
+    st.caption("Οι αναμενόμενες επικεφαλίδες προέρχονται από τα δύο πρότυπα DRAFT.")
+    with st.expander("Αναμενόμενες στήλες"):
+        st.dataframe(pd.DataFrame({"Στήλη": DRAFT_HEADERS[kind]}), hide_index=True, use_container_width=True)
+    st.subheader("Δοκιμή ελέγχων με συνθετικά δεδομένα")
+    st.caption("Το παράδειγμα περιέχει σκόπιμα κενό ΑΦΜ, για να φανεί η αναφορά ελέγχου.")
+    demo = synthetic_draft(kind)
+    st.dataframe(demo, hide_index=True, use_container_width=True)
+    if st.button("Έλεγχος δοκιμαστικού DRAFT", type="primary"):
+        checked, report = validate_draft(demo, kind)
+        st.metric("Εγγραφές", len(checked))
+        if report.empty:
+            st.success("Δεν βρέθηκαν προβλήματα.")
+        else:
+            st.error(f"Βρέθηκαν {len(report)} παρατηρήσεις. Δεν εγκρίνεται εισαγωγή.")
+            st.dataframe(report, hide_index=True, use_container_width=True)
+            st.download_button("Λήψη αναφοράς ελέγχου CSV", report.to_csv(index=False).encode("utf-8-sig"), "elegxos_draft.csv", "text/csv")
+    st.info("Η φόρτωση πραγματικού DRAFT και η εγγραφή στο υπάρχον SharePoint Excel θα ενεργοποιηθούν μόνο σε εγκεκριμένη ιδιωτική εγκατάσταση, με έλεγχο αντιστοίχισης στηλών, δικαιώματα, αντίγραφο ασφαλείας και αποφυγή διπλοεγγραφών.")
 
 
 # ============================================================
