@@ -515,6 +515,94 @@ if "category_mappings" not in st.session_state:
     st.session_state.category_mappings = {}
 
 
+
+# ============================================================
+# SUPABASE — ΚΑΤΗΓΟΡΙΕΣ / ΥΠΟΚΑΤΗΓΟΡΙΕΣ / ΑΝΤΙΣΤΟΙΧΙΣΕΙΣ
+# ============================================================
+def fetch_category_registry():
+    with connect() as conn:
+        with conn.cursor() as cur:
+            tables = (
+                ("SELECT id, name, is_active FROM mpa.categories ORDER BY name, id", ("id", "name", "is_active")),
+                ("SELECT id, category_id, name, is_active FROM mpa.subcategories ORDER BY name, id", ("id", "category_id", "name", "is_active")),
+                ("SELECT id, name FROM mpa.supermarket_chains ORDER BY name, id", ("id", "name")),
+                ("SELECT id, chain_id, source_category, category_id, subcategory_id, is_active FROM mpa.category_mappings ORDER BY id", ("id", "chain_id", "source_category", "category_id", "subcategory_id", "is_active")),
+            )
+            output = []
+            for sql, cols in tables:
+                cur.execute(sql)
+                output.append([dict(zip(cols, row)) for row in cur.fetchall()])
+            return tuple(output)
+
+
+def save_category_record(table, record_id, name, is_active, category_id=None):
+    if table not in ("categories", "subcategories"):
+        raise ValueError("Μη έγκυρος πίνακας.")
+    if not name:
+        raise ValueError("Η ονομασία είναι υποχρεωτική.")
+    with connect() as conn:
+        with conn.cursor() as cur:
+            if table == "categories":
+                cur.execute("SELECT id FROM mpa.categories WHERE lower(trim(name))=lower(trim(%s)) AND id IS DISTINCT FROM %s LIMIT 1", (name, record_id))
+                if cur.fetchone():
+                    raise ValueError("Η κατηγορία υπάρχει ήδη.")
+                if record_id is None:
+                    cur.execute("INSERT INTO mpa.categories (name, is_active) VALUES (%s,%s)", (name, is_active))
+                else:
+                    cur.execute("UPDATE mpa.categories SET name=%s, is_active=%s WHERE id=%s", (name, is_active, record_id))
+            else:
+                if category_id is None:
+                    raise ValueError("Επίλεξε κατηγορία.")
+                cur.execute("SELECT id FROM mpa.subcategories WHERE category_id=%s AND lower(trim(name))=lower(trim(%s)) AND id IS DISTINCT FROM %s LIMIT 1", (category_id, name, record_id))
+                if cur.fetchone():
+                    raise ValueError("Η υποκατηγορία υπάρχει ήδη σε αυτή την κατηγορία.")
+                if record_id is None:
+                    cur.execute("INSERT INTO mpa.subcategories (category_id,name,is_active) VALUES (%s,%s,%s)", (category_id, name, is_active))
+                else:
+                    cur.execute("UPDATE mpa.subcategories SET category_id=%s,name=%s,is_active=%s WHERE id=%s", (category_id, name, is_active, record_id))
+
+
+def save_mapping_record(record_id, chain_id, source, category_id, subcategory_id, is_active):
+    if not source:
+        raise ValueError("Η ονομασία της αλυσίδας είναι υποχρεωτική.")
+    with connect() as conn:
+        with conn.cursor() as cur:
+            if subcategory_id is not None:
+                cur.execute("SELECT 1 FROM mpa.subcategories WHERE id=%s AND category_id=%s", (subcategory_id, category_id))
+                if not cur.fetchone():
+                    raise ValueError("Η υποκατηγορία δεν ανήκει στην επιλεγμένη κατηγορία.")
+            cur.execute("SELECT id FROM mpa.category_mappings WHERE chain_id=%s AND lower(trim(source_category))=lower(trim(%s)) AND id IS DISTINCT FROM %s LIMIT 1", (chain_id, source, record_id))
+            if cur.fetchone():
+                raise ValueError("Υπάρχει ήδη αντιστοίχιση με αυτή την ονομασία στην αλυσίδα.")
+            if record_id is None:
+                cur.execute("INSERT INTO mpa.category_mappings (chain_id,source_category,category_id,subcategory_id,is_active) VALUES (%s,%s,%s,%s,%s)",
+                            (chain_id, source, category_id, subcategory_id, is_active))
+            else:
+                cur.execute("UPDATE mpa.category_mappings SET chain_id=%s,source_category=%s,category_id=%s,subcategory_id=%s,is_active=%s WHERE id=%s",
+                            (chain_id, source, category_id, subcategory_id, is_active, record_id))
+
+
+def active_category_mappings():
+    """Active DB mappings for the synthetic DRAFT checker; no data imported."""
+    categories, subcategories, chains, mappings = fetch_category_registry()
+    cat = {r["id"]: r for r in categories}
+    sub = {r["id"]: r for r in subcategories}
+    ch = {r["id"]: r for r in chains}
+    output = {}
+    for m in mappings:
+        c = cat.get(m["category_id"])
+        sc = sub.get(m["subcategory_id"]) if m["subcategory_id"] is not None else None
+        chain = ch.get(m["chain_id"])
+        if not (m["is_active"] and c and c["is_active"] and chain):
+            continue
+        if m["subcategory_id"] is not None and not (sc and sc["is_active"]):
+            continue
+        output[mapping_key(chain["name"], m["source_category"])] = {
+            "Κατηγορία": c["name"], "Υποκατηγορία": sc["name"] if sc else ""
+        }
+    return output
+
+
 # ============================================================
 # ΠΛΕΥΡΙΚΟ ΜΕΝΟΥ
 # ============================================================
@@ -722,41 +810,174 @@ elif page == "🏢 Μητρώο Προμηθευτών":
 
 elif page == "🗂️ Μητρώο Κατηγοριών":
     st.title("🗂️ Μητρώο Κατηγοριών")
-    st.caption("Επίσημος κατάλογος κατηγοριών για τον έλεγχο των DRAFT Excel.")
-    st.metric("Σύνολο κατηγοριών", len(PRODUCT_CATEGORIES))
-    category_search = st.text_input("Αναζήτηση κατηγορίας", placeholder="Πληκτρολογήστε όνομα κατηγορίας")
-    shown_categories = [item for item in PRODUCT_CATEGORIES if normalize_category(category_search) in normalize_category(item)]
-    st.dataframe(pd.DataFrame({"Κατηγορία προϊόντος": shown_categories}), hide_index=True, use_container_width=True)
-    st.divider()
-    st.subheader("Υποκατηγορίες και αντιστοιχίσεις αλυσίδων")
-    st.caption("Κάθε αλυσίδα μπορεί να έχει διαφορετική ονομασία. Η αντιστοίχιση εγκρίνεται από εμάς και συνδέεται με μία επίσημη κατηγορία.")
-    with st.form("new_category_mapping", clear_on_submit=True):
-        chain = st.selectbox("Αλυσίδα σούπερ μάρκετ", SUPERMARKET_CHAINS)
-        raw_name = st.text_input("Κατηγορία όπως τη δηλώνει το σούπερ μάρκετ", placeholder="π.χ. INSTANT COFFEE")
-        official = st.selectbox("Επίσημη κατηγορία", PRODUCT_CATEGORIES, index=PRODUCT_CATEGORIES.index("ΚΑΦΕΣ ΣΥΣΚΕΥΑΣΜΕΝΟΣ"))
-        subcategory = st.text_input("Υποκατηγορία", placeholder="π.χ. Στιγμιαίος καφές")
-        submitted = st.form_submit_button("Προσθήκη αντιστοίχισης", type="primary")
-    if submitted:
-        if not raw_name.strip() or not subcategory.strip():
-            st.error("Συμπλήρωσε την ονομασία της αλυσίδας και την υποκατηγορία.")
-        elif mapping_key(chain, raw_name) in st.session_state.category_mappings:
-            st.error("Η αντιστοίχιση υπάρχει ήδη για αυτή την αλυσίδα. Δεν αντικαταστάθηκε.")
-        else:
-            st.session_state.category_mappings[mapping_key(chain, raw_name)] = {
-                "Κατηγορία": official,
-                "Υποκατηγορία": " ".join(subcategory.split()),
-            }
-            st.success("Η αντιστοίχιση προστέθηκε στη δοκιμαστική συνεδρία.")
-    mappings_rows = [
-        {"Αλυσίδα": chain_name, "Κατηγορία αλυσίδας": raw,
-         "Επίσημη κατηγορία": target["Κατηγορία"], "Υποκατηγορία": target["Υποκατηγορία"]}
-        for (chain_name, raw), target in st.session_state.category_mappings.items()
-    ]
-    if mappings_rows:
-        st.dataframe(pd.DataFrame(mappings_rows), hide_index=True, use_container_width=True)
-    else:
-        st.info("Δεν έχουν προστεθεί ακόμη αντιστοιχίσεις στη δοκιμαστική συνεδρία.")
-    st.caption("DEMO: Οι αλλαγές χάνονται όταν λήξει η συνεδρία. Δεν αποθηκεύονται στο SharePoint.")
+    st.caption("Μόνιμη αποθήκευση στο Supabase (schema mpa).")
+    can_edit_categories = current_user["role"] in ("admin", "analyst")
+    try:
+        categories, subcategories, chains, mappings = fetch_category_registry()
+    except Exception as exc:
+        st.error("Αδυναμία φόρτωσης Μητρώου Κατηγοριών από το Supabase.")
+        st.stop()
+
+    a, b, c = st.columns(3)
+    a.metric("Κατηγορίες", len(categories))
+    b.metric("Υποκατηγορίες", len(subcategories))
+    c.metric("Αντιστοιχίσεις", len(mappings))
+    tab_c, tab_s, tab_m = st.tabs(["📋 Κατηγορίες", "🧩 Υποκατηγορίες", "🔗 Αντιστοιχίσεις αλυσίδων"])
+    category_by_id = {r["id"]: r for r in categories}
+    chain_by_id = {r["id"]: r for r in chains}
+    sub_by_id = {r["id"]: r for r in subcategories}
+
+    with tab_c:
+        category_status = st.selectbox("Κατάσταση", ["Όλες", "Ενεργές", "Ανενεργές"], key="category_status_filter")
+        category_query = st.text_input("🔍 Αναζήτηση κατηγορίας", key="category_query")
+        rows = [r for r in categories if category_query.casefold() in r["name"].casefold()
+                and (category_status == "Όλες" or r["is_active"] == (category_status == "Ενεργές"))]
+        st.dataframe(pd.DataFrame([{"ID": r["id"], "Κατηγορία": r["name"], "Κατάσταση": "Ενεργή" if r["is_active"] else "Ανενεργή"} for r in rows]),
+                     use_container_width=True, hide_index=True)
+        if can_edit_categories:
+            with st.expander("➕ Νέα κατηγορία"):
+                with st.form("create_category"):
+                    new_category = st.text_input("Επίσημη ονομασία κατηγορίας")
+                    create_category = st.form_submit_button("Αποθήκευση", type="primary")
+                if create_category:
+                    if not new_category.strip():
+                        st.error("Η ονομασία είναι υποχρεωτική.")
+                    else:
+                        try:
+                            save_category_record("categories", None, new_category.strip(), True)
+                            st.success("Η κατηγορία αποθηκεύτηκε.")
+                            st.rerun()
+                        except ValueError as e:
+                            st.error(str(e))
+                        except Exception:
+                            st.error("Αποτυχία αποθήκευσης. Ελέγξτε τη βάση.")
+            if categories:
+                with st.expander("✏️ Επεξεργασία κατηγορίας / κατάσταση"):
+                    category_id = st.selectbox("Επιλογή κατηγορίας", [r["id"] for r in categories],
+                        format_func=lambda i: category_by_id[i]["name"], key="category_edit_id")
+                    selected = category_by_id[category_id]
+                    with st.form(f"edit_category_{category_id}"):
+                        edited_name = st.text_input("Ονομασία", value=selected["name"])
+                        edited_active = st.checkbox("Ενεργή", value=selected["is_active"])
+                        save = st.form_submit_button("Αποθήκευση αλλαγών", type="primary")
+                    if save:
+                        try:
+                            save_category_record("categories", category_id, edited_name.strip(), edited_active)
+                            st.success("Οι αλλαγές αποθηκεύτηκαν.")
+                            st.rerun()
+                        except ValueError as e:
+                            st.error(str(e))
+                        except Exception:
+                            st.error("Αποτυχία αποθήκευσης. Ελέγξτε τη βάση.")
+
+    with tab_s:
+        sub_status = st.selectbox("Κατάσταση υποκατηγοριών", ["Όλες", "Ενεργές", "Ανενεργές"], key="sub_status_filter")
+        sub_query = st.text_input("🔍 Αναζήτηση υποκατηγορίας", key="sub_query")
+        subrows = [r for r in subcategories if sub_query.casefold() in r["name"].casefold()
+                   and (sub_status == "Όλες" or r["is_active"] == (sub_status == "Ενεργές"))]
+        st.dataframe(pd.DataFrame([{"ID": r["id"], "Κατηγορία": category_by_id.get(r["category_id"], {}).get("name", "—"),
+            "Υποκατηγορία": r["name"], "Κατάσταση": "Ενεργή" if r["is_active"] else "Ανενεργή"} for r in subrows]),
+            use_container_width=True, hide_index=True)
+        if can_edit_categories and categories:
+            with st.expander("➕ Νέα υποκατηγορία"):
+                with st.form("create_subcategory"):
+                    parent_id = st.selectbox("Επίσημη κατηγορία", [r["id"] for r in categories if r["is_active"]],
+                        format_func=lambda i: category_by_id[i]["name"], key="sub_parent_new")
+                    sub_name = st.text_input("Ονομασία υποκατηγορίας")
+                    create_sub = st.form_submit_button("Αποθήκευση", type="primary")
+                if create_sub:
+                    try:
+                        save_category_record("subcategories", None, sub_name.strip(), True, parent_id)
+                        st.success("Η υποκατηγορία αποθηκεύτηκε.")
+                        st.rerun()
+                    except ValueError as e:
+                        st.error(str(e))
+                    except Exception:
+                        st.error("Αποτυχία αποθήκευσης. Ελέγξτε τη βάση.")
+            if subcategories:
+                with st.expander("✏️ Επεξεργασία υποκατηγορίας / κατάσταση"):
+                    sub_id = st.selectbox("Επιλογή υποκατηγορίας", [r["id"] for r in subcategories],
+                        format_func=lambda i: f'{category_by_id.get(sub_by_id[i]["category_id"], {}).get("name", "—")} / {sub_by_id[i]["name"]}',
+                        key="sub_edit_id")
+                    selected_sub = sub_by_id[sub_id]
+                    with st.form(f"edit_subcategory_{sub_id}"):
+                        parent_id = st.selectbox("Επίσημη κατηγορία", [r["id"] for r in categories],
+                            index=[r["id"] for r in categories].index(selected_sub["category_id"]),
+                            format_func=lambda i: category_by_id[i]["name"], key=f"sub_parent_{sub_id}")
+                        sub_name = st.text_input("Ονομασία", value=selected_sub["name"])
+                        sub_active = st.checkbox("Ενεργή", value=selected_sub["is_active"])
+                        save_sub = st.form_submit_button("Αποθήκευση αλλαγών", type="primary")
+                    if save_sub:
+                        try:
+                            save_category_record("subcategories", sub_id, sub_name.strip(), sub_active, parent_id)
+                            st.success("Οι αλλαγές αποθηκεύτηκαν.")
+                            st.rerun()
+                        except ValueError as e:
+                            st.error(str(e))
+                        except Exception:
+                            st.error("Αποτυχία αποθήκευσης. Ελέγξτε τη βάση.")
+
+    with tab_m:
+        st.dataframe(pd.DataFrame([{
+            "ID": r["id"], "Αλυσίδα": chain_by_id.get(r["chain_id"], {}).get("name", "—"),
+            "Ονομασία αλυσίδας": r["source_category"],
+            "Επίσημη κατηγορία": category_by_id.get(r["category_id"], {}).get("name", "—"),
+            "Υποκατηγορία": sub_by_id.get(r["subcategory_id"], {}).get("name", ""),
+            "Κατάσταση": "Ενεργή" if r["is_active"] else "Ανενεργή"} for r in mappings]),
+            use_container_width=True, hide_index=True)
+        if not chains:
+            st.warning("Δεν υπάρχουν αλυσίδες στη βάση. Ελέγξτε το mpa.supermarket_chains.")
+        if can_edit_categories and chains and categories:
+            with st.expander("➕ Νέα αντιστοίχιση"):
+                category_id = st.selectbox("Επίσημη κατηγορία", [r["id"] for r in categories if r["is_active"]],
+                    format_func=lambda i: category_by_id[i]["name"], key="mapping_category_new")
+                with st.form("create_mapping"):
+                    chain_id = st.selectbox("Αλυσίδα", [r["id"] for r in chains], format_func=lambda i: chain_by_id[i]["name"])
+                    source = st.text_input("Κατηγορία όπως τη δηλώνει η αλυσίδα")
+                    choices = [None] + [r["id"] for r in subcategories if r["category_id"] == category_id and r["is_active"]]
+                    subcategory_id = st.selectbox("Υποκατηγορία (προαιρετικά)", choices,
+                        format_func=lambda i: "Χωρίς υποκατηγορία" if i is None else sub_by_id[i]["name"])
+                    create_mapping = st.form_submit_button("Αποθήκευση", type="primary")
+                if create_mapping:
+                    try:
+                        save_mapping_record(None, chain_id, source.strip(), category_id, subcategory_id, True)
+                        st.success("Η αντιστοίχιση αποθηκεύτηκε.")
+                        st.rerun()
+                    except ValueError as e:
+                        st.error(str(e))
+                    except Exception:
+                        st.error("Αποτυχία αποθήκευσης. Ελέγξτε τη βάση.")
+            if mappings:
+                with st.expander("✏️ Επεξεργασία αντιστοίχισης / κατάσταση"):
+                    mapping_by_id = {r["id"]: r for r in mappings}
+                    mapping_id = st.selectbox("Επιλογή αντιστοίχισης", [r["id"] for r in mappings],
+                        format_func=lambda i: f'{chain_by_id.get(mapping_by_id[i]["chain_id"], {}).get("name", "—")} / {mapping_by_id[i]["source_category"]}')
+                    selected_map = mapping_by_id[mapping_id]
+                    category_ids = [r["id"] for r in categories]
+                    category_id = st.selectbox("Επίσημη κατηγορία", category_ids,
+                        index=category_ids.index(selected_map["category_id"]),
+                        format_func=lambda i: category_by_id[i]["name"], key="mapping_category_edit")
+                    with st.form(f"edit_mapping_{mapping_id}"):
+                        chain_ids = [r["id"] for r in chains]
+                        chain_id = st.selectbox("Αλυσίδα", chain_ids, index=chain_ids.index(selected_map["chain_id"]),
+                            format_func=lambda i: chain_by_id[i]["name"], key="mapping_chain_edit")
+                        source = st.text_input("Ονομασία αλυσίδας", value=selected_map["source_category"])
+                        choices = [None] + [r["id"] for r in subcategories if r["category_id"] == category_id]
+                        previous_sub = selected_map["subcategory_id"] if selected_map["subcategory_id"] in choices else None
+                        subcategory_id = st.selectbox("Υποκατηγορία", choices, index=choices.index(previous_sub),
+                            format_func=lambda i: "Χωρίς υποκατηγορία" if i is None else sub_by_id[i]["name"], key="mapping_sub_edit")
+                        mapping_active = st.checkbox("Ενεργή", value=selected_map["is_active"])
+                        save_map = st.form_submit_button("Αποθήκευση αλλαγών", type="primary")
+                    if save_map:
+                        try:
+                            save_mapping_record(mapping_id, chain_id, source.strip(), category_id, subcategory_id, mapping_active)
+                            st.success("Οι αλλαγές αποθηκεύτηκαν.")
+                            st.rerun()
+                        except ValueError as e:
+                            st.error(str(e))
+                        except Exception:
+                            st.error("Αποτυχία αποθήκευσης. Ελέγξτε τη βάση.")
+    st.info("Οι αλλαγές αποθηκεύονται στη βάση. Δεν έχει προστεθεί ακόμη ειδικό ιστορικό αλλαγών κατηγοριών.")
 
 
 # ============================================================
@@ -789,7 +1010,7 @@ elif page == "📥 Εισαγωγή Excel":
     demo = synthetic_draft(kind)
     st.dataframe(demo, hide_index=True, use_container_width=True)
     if st.button("Έλεγχος δοκιμαστικού DRAFT", type="primary"):
-        checked, report = validate_draft(demo, kind, st.session_state.category_mappings)
+        checked, report = validate_draft(demo, kind, active_category_mappings())
         st.metric("Εγγραφές", len(checked))
         try:
             missing_suppliers = unknown_draft_suppliers(checked)
